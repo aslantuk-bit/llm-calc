@@ -1,0 +1,215 @@
+<script>
+(() => {
+  const C = LLMCalc, GB = C.GB, $ = id => document.getElementById(id);
+  const fmtGB = b => (b / GB).toFixed(b / GB < 10 ? 2 : 1) + ' ГБ';
+  const fmtN = (n, d = 0) => n.toLocaleString('ru-RU', { maximumFractionDigits: d });
+  const fmtCtx = n => n >= 1024 ? (n / 1024) % 1 === 0 ? (n / 1024) + 'k' : (n / 1024).toFixed(1) + 'k' : String(n);
+  const fmtBw = g => g >= 1000 ? (g / 1000).toFixed(2) + ' ТБ/с' : fmtN(g) + ' ГБ/с';
+
+  // --- заполнение списков
+  const modelSel = $('model');
+  const mGroups = {};
+  C.MODELS.forEach((m, i) => {
+    if (!mGroups[m.family]) { mGroups[m.family] = document.createElement('optgroup'); mGroups[m.family].label = m.family; modelSel.appendChild(mGroups[m.family]); }
+    mGroups[m.family].appendChild(new Option(m.name, i));
+  });
+  const mog = document.createElement('optgroup'); mog.label = 'Своё'; mog.appendChild(new Option('Своя модель…', 'custom')); modelSel.appendChild(mog);
+  modelSel.value = C.MODELS.findIndex(m => m.name.startsWith('Llama 3.1 8B'));
+  const quantSel = $('quant');
+  for (const k in C.QUANTS) quantSel.add(new Option(C.QUANTS[k].label + ' · ' + C.QUANTS[k].bpw + ' бит', k));
+  quantSel.value = 'Q4_K_M';
+  const kvSel = $('kvq');
+  for (const k in C.KV_QUANTS) kvSel.add(new Option(k + ' · ' + C.KV_QUANTS[k] + ' бит', k));
+  const hwSel = $('hw');
+  const groups = {};
+  C.HARDWARE.forEach((h, i) => {
+    if (!groups[h.group]) { groups[h.group] = document.createElement('optgroup'); groups[h.group].label = h.group; hwSel.appendChild(groups[h.group]); }
+    groups[h.group].appendChild(new Option(h.name, i));
+  });
+  const og = document.createElement('optgroup'); og.label = 'Своё'; og.appendChild(new Option('Своё железо…', 'custom')); hwSel.appendChild(og);
+  hwSel.value = C.HARDWARE.findIndex(h => h.name.startsWith('Mac mini · M5 Pro'));
+
+  // --- чтение состояния
+  function currentModel() {
+    if (modelSel.value === 'custom') {
+      const p = +$('cParams').value * 1e9, a = Math.min(+$('cActive').value * 1e9, p);
+      return { name: 'Своя модель', params: p, active: a, layers: +$('cLayers').value, kvHeads: +$('cKv').value, headDim: +$('cHead').value, hidden: +$('cHidden').value, maxCtx: 1 << 20 };
+    }
+    return C.MODELS[+modelSel.value];
+  }
+  let hwUnified = true, hwCpuOnly = false;
+  function currentHw() {
+    return { unified: hwUnified, cpuOnly: hwCpuOnly, memGB: +$('hwMem').value, bandwidthGBs: +$('hwBw').value, tflops: +$('hwTf').value,
+      sysMemGB: +$('sysMem').value, sysBandwidthGBs: +$('sysBw').value, sysTflops: 1 };
+  }
+  function applyHwPreset() {
+    const v = hwSel.value;
+    const memOpt = $('hwMemOpt');
+    if (v === 'custom') { hwUnified = false; hwCpuOnly = false; memOpt.style.display = 'none'; $('hwMem').style.display = ''; $('hwMemNote').textContent = 'Дискретная карта: вся память доступна модели. Для единой памяти (Mac, APU) выберите похожий пресет и поправьте числа.'; }
+    else {
+      const h = C.HARDWARE[+v];
+      hwUnified = h.unified; hwCpuOnly = !!h.cpuOnly;
+      $('hwBw').value = h.bandwidthGBs; $('hwTf').value = h.tflops;
+      $('sysMem').value = h.sysMemGB; $('sysBw').value = h.sysBandwidthGBs;
+      if (h.memOptions) {
+        memOpt.innerHTML = ''; h.memOptions.forEach(m => memOpt.add(new Option(m + ' ГБ', m)));
+        memOpt.value = h.memGB; memOpt.style.display = ''; $('hwMem').style.display = 'none'; $('hwMem').value = h.memGB;
+      } else { memOpt.style.display = 'none'; $('hwMem').style.display = ''; $('hwMem').value = h.memGB; }
+      $('hwMemNote').textContent = h.cpuOnly ? 'Только процессор: под модель уходит ~85 % ОЗУ, остальное — системе.'
+        : h.unified ? 'Единая память: GPU получает 2/3 (≤36 ГБ) или 3/4 (больше) от общего объёма.' : 'Дискретная карта: вся видеопамять доступна модели.';
+    }
+    $('sysBlock').style.display = hwUnified ? 'none' : '';
+  }
+  $('hwMemOpt').addEventListener('change', () => { $('hwMem').value = $('hwMemOpt').value; render(); });
+
+  function applyModelPreset() {
+    const custom = modelSel.value === 'custom';
+    $('custom').classList.toggle('show', custom);
+    const m = currentModel();
+    const maxLog = Math.log2(m.maxCtx);
+    $('ctx').max = Math.max(10, maxLog);
+    if (+$('ctx').value > maxLog) $('ctx').value = maxLog;
+    if (!custom) {
+      const isOss = m.name.startsWith('GPT-OSS');
+      if (isOss) quantSel.value = 'MXFP4'; else if (quantSel.value === 'MXFP4') quantSel.value = 'Q4_K_M';
+    }
+  }
+  $('cParams').addEventListener('input', () => {
+    const p = +$('cParams').value * 1e9;
+    $('cLayers').value = C.estimateLayers(p);
+    if (+$('cActive').value > +$('cParams').value) $('cActive').value = $('cParams').value;
+  });
+
+  // --- вывод
+  const row = (label, value, note) => `<tr><td>${label}${note ? `<small>${note}</small>` : ''}</td><td>${value}</td></tr>`;
+
+  function render() {
+    const model = currentModel(), quant = C.QUANTS[quantSel.value];
+    const ctx = Math.round(2 ** +$('ctx').value), kvBits = C.KV_QUANTS[kvSel.value];
+    $('ctxVal').textContent = fmtCtx(ctx);
+    $('quantNote').textContent = quant.note;
+    const cfg = { model, bpw: quant.bpw, ctx, kvBits };
+    const goal = { genTps: +$('tps').value, promptTokens: +$('prompt').value, promptSeconds: +$('promptSec').value };
+
+    const mem = C.memoryNeeded(cfg);
+    const bytes = C.bytesPerGeneratedToken(cfg);
+    const kvTok = C.kvBytesPerToken(model, kvBits, ctx);
+    const reqBw = C.requiredBandwidthGBs(bytes, goal.genTps);
+    const reqTf = C.requiredTflops(model, goal.promptTokens, goal.promptSeconds);
+    const moe = model.active < model.params;
+    const macNeed = mem.total <= 36 * GB * 2 / 3 ? mem.total * 3 / 2 : mem.total * 4 / 3;
+
+    $('reqTable').innerHTML =
+      row('Память под модель', fmtGB(mem.total), `веса ${fmtGB(mem.weights)} + KV ${fmtGB(mem.kv)} + накладные ${fmtGB(mem.overhead)}`) +
+      row('Дискретная видеокарта', `от ${Math.ceil(mem.total / GB)} ГБ VRAM`, 'целиком в видеопамяти') +
+      row('Mac / единая память', `от ${Math.ceil(macNeed / GB)} ГБ`, 'с учётом доли, которую macOS оставляет системе') +
+      row('Только процессор', `от ${Math.ceil(mem.total / GB / 0.85)} ГБ ОЗУ`, 'и не меньше 8 быстрых ядер; скорость см. справа') +
+      row(`Пропускная способность под ${goal.genTps} ток/с`, fmtBw(reqBw), `на токен читается ${fmtGB(bytes)}${moe ? ' (только активные ' + fmtN(model.active / 1e9, 1) + ' млрд)' : ''}`) +
+      row(`Вычисления под ${fmtN(goal.promptTokens)} токенов за ${goal.promptSeconds} с`, fmtN(reqTf, reqTf < 10 ? 1 : 0) + ' TFLOPS', 'FP16, практичные; обработка промпта') +
+      row('Место на диске', fmtGB(mem.weights * 1.02), 'файл весов; держите запас под другие кванты') +
+      row('KV-кэш на 1 токен', fmtN(kvTok / 1024, 1) + ' КБ', `${model.layers} слоёв${model.kvLayers ? ' (KV в ' + model.kvLayers + ')' : ''} × ${model.kvHeads} KV-голов × ${model.headDim}${model.kvFactor === 1 ? ' (MLA)' : ''}${model.kvScale ? ' × ' + model.kvScale : ''}${model.window ? ', окно ' + model.window : ''}${model.note ? '; ' + model.note : ''}`);
+
+    const hw = currentHw();
+    const f = C.fit(cfg, hw);
+    const v = C.verdict(f, goal);
+    const vEl = $('verdict');
+    vEl.className = 'verdict ' + v;
+    const titles = { good: 'Удобно', ok: 'Терпимо', bad: 'Не годится' };
+    const promptSec = f.prefillTps ? goal.promptTokens / f.prefillTps : Infinity;
+    let sub = '';
+    if (f.status === 'nofit') sub = `Нужно ${fmtGB(f.need)}, доступно ${fmtGB(f.usable)}${hw.unified ? '' : ' + ОЗУ ' + fmtGB(hw.sysMemGB * GB * 0.85)}. Возьмите квант поменьше или сократите контекст.`;
+    else {
+      const parts = [f.status === 'offload' ? `в видеопамять влезает ${Math.round(f.gpuFraction * 100)} %, остальное в ОЗУ` : 'влезает целиком'];
+      parts.push(f.genTps >= goal.genTps ? `генерация ${fmtN(f.genTps, 1)} ток/с при цели ${goal.genTps}` : `генерация ${fmtN(f.genTps, 1)} ток/с медленнее цели ${goal.genTps}`);
+      if (promptSec > goal.promptSeconds) parts.push(`промпт ${fmtN(promptSec)} с вместо ${goal.promptSeconds}`);
+      sub = parts.join('; ') + '.';
+      sub = sub[0].toUpperCase() + sub.slice(1);
+    }
+    vEl.innerHTML = titles[v] + `<small>${sub}</small>`;
+
+    const maxCtx = C.maxContext({ model, bpw: quant.bpw, kvBits }, hw);
+    $('fitTable').innerHTML =
+      row('Доступно памяти', fmtGB(f.usable), hw.unified ? `из ${hw.memGB} ГБ единой памяти` : `${hw.memGB} ГБ видеопамяти`) +
+      row('Нужно', fmtGB(f.need), f.status === 'fits' ? `запас ${fmtGB(f.usable - f.need)}` : `не хватает ${fmtGB(f.need - f.usable)}`) +
+      row('Генерация', f.genTps ? fmtN(f.genTps, 1) + ' ток/с' : '—', `${fmtBw(hw.bandwidthGBs)} × 0,7 ÷ ${fmtGB(bytes)} на токен${f.status === 'offload' ? ', часть через ОЗУ' : ''}`) +
+      row('Обработка промпта', f.prefillTps ? fmtN(f.prefillTps) + ' ток/с' : '—', f.prefillTps ? `${fmtN(goal.promptTokens)} токенов за ${promptSec < 1 ? promptSec.toFixed(1) : fmtN(promptSec)} с` : '') +
+      row('Максимальный контекст', maxCtx ? fmtCtx(Math.min(maxCtx, model.maxCtx)) + (maxCtx > model.maxCtx ? '<span class="chip">предел модели</span>' : '') : '—', 'при котором модель целиком в памяти ускорителя') +
+      row('Время до первого слова', f.prefillTps ? (promptSec + 1 / f.genTps).toFixed(1) + ' с' : '—', 'промпт + первый токен');
+
+    renderDiag(cfg, hw, goal, f, maxCtx);
+  }
+
+  const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  function renderDiag(cfg, hw, goal, f, maxCtx) {
+    const d = C.diagnose(cfg, hw, goal);
+    const { model } = cfg;
+    const pct = x => Math.round(x * 100) + ' %';
+    const q = k => `${C.QUANTS[k].label} (${C.QUANTS[k].bpw} бит)`;
+    const tpsAt = (k, kvBits = cfg.kvBits) => fmtN(C.fit({ ...cfg, bpw: C.QUANTS[k].bpw, kvBits }, hw).genTps, 1);
+    const ctxTip = () => maxCtx > 0 && maxCtx < cfg.ctx ? `Сократить контекст до ${fmtCtx(maxCtx)}: тогда влезет как есть.` : null;
+    const kvTip = () => d.kvQ8Fits ? 'Квантовать KV-кэш в Q8_0: влезет при текущем контексте, качество почти не страдает.'
+      : d.kvQ4Fits ? 'Квантовать KV-кэш в Q4_0: влезет при текущем контексте, но на длинных диалогах возможны потери.' : null;
+    const memShare = d.kvShare > 0.3 ? `KV-кэш занимает ${pct(d.kvShare)} памяти модели, контекст ${fmtCtx(cfg.ctx)} стоит дорого.` : 'Основной объём — веса модели.';
+    const tips = [];
+    let title = '', why = '';
+
+    if (d.bottleneck === 'memory') {
+      title = 'Узкое место: память';
+      why = `Нужно ${fmtGB(f.need)}, доступно ${fmtGB(f.usable)}${hw.unified ? '' : ' плюс ОЗУ ' + fmtGB(hw.sysMemGB * GB * 0.85)}. ${memShare}`;
+      if (d.bestQuantFits) {
+        const meets = d.bestQuantMeetsTarget === d.bestQuantFits;
+        tips.push(`Взять квант ${q(d.bestQuantFits)}: влезет целиком и даст ${tpsAt(d.bestQuantFits)} ток/с${meets ? '' : ', но это медленнее цели'}.`);
+      } else tips.push('Ни один квант этой модели не влезает даже с частичной выгрузкой: нужна модель поменьше или больше памяти.');
+      const kt = kvTip(); if (kt) tips.push(kt);
+      const ct = ctxTip(); if (ct) tips.push(ct);
+      if (d.macWiredLimitHelps) tips.push(`На Mac поднять лимит памяти GPU: <code>sudo sysctl iogpu.wired_limit_mb=${Math.round(hw.memGB * 0.9 * 1024)}</code>. Тогда модель влезет; после перезагрузки лимит сбросится.`);
+      if (!hw.unified) tips.push(`Добавить ОЗУ: со свободными ${Math.ceil((f.need - f.usable) / 0.85 / GB)} ГБ запустится с выгрузкой${d.moe && d.expertOffloadTps ? `: у MoE эксперты в ОЗУ дадут около ${fmtN(d.expertOffloadTps, 1)} ток/с (llama.cpp: <code>--n-cpu-moe N</code>)` : ' слоёв, но у плотной модели это будет очень медленно'}.`);
+      tips.push(`Или железо с памятью от ${Math.ceil(f.need / GB)} ГБ${hw.unified ? ` (для Mac от ${Math.ceil(f.need / GB / (f.need <= 36 * GB * 2 / 3 ? 2 / 3 : 3 / 4))} ГБ общей)` : ''}.`);
+    } else if (d.bottleneck === 'offload') {
+      title = 'Узкое место: выгрузка в ОЗУ';
+      why = `В памяти ускорителя только ${pct(f.gpuFraction)} модели, остальное читается через ОЗУ (${fmtBw(hw.sysBandwidthGBs)} против ${fmtBw(hw.bandwidthGBs)}). ` +
+        (d.moe ? 'У MoE на токен читаются только активные веса, поэтому скорость терпимая.' : 'У плотной модели каждый токен читает все веса, поэтому скорость падает почти до уровня чистого процессора.');
+      if (d.bestQuantFits) tips.push(`Квант ${q(d.bestQuantFits)}: влезет целиком, ${tpsAt(d.bestQuantFits)} ток/с${d.bestQuantMeetsTarget === d.bestQuantFits ? '' : ' (медленнее цели, но без выгрузки)'}.`);
+      if (d.moe && d.expertOffloadTps) tips.push(`Оставить внимание и KV-кэш на GPU, экспертов в ОЗУ (llama.cpp: <code>--n-cpu-moe N</code> или <code>-ot "exps=CPU"</code>): около ${fmtN(d.expertOffloadTps, 1)} ток/с, и обработка промпта останется быстрой.`);
+      const kt = kvTip(); if (kt) tips.push(kt);
+      const ct = ctxTip(); if (ct) tips.push(ct);
+      tips.push('Быстрее ОЗУ помогает напрямую: DDR5-6400 в двух каналах ≈ 100 ГБ/с, восемь каналов ≈ 300.');
+      tips.push(`Или память ускорителя от ${Math.ceil(f.need / GB)} ГБ.`);
+    } else if (d.bottleneck === 'bandwidth') {
+      title = 'Узкое место: пропускная способность памяти';
+      const w = C.weightsBytes(model.active, cfg.bpw), kv = f.bytesPerToken - w;
+      why = `Каждый токен читает ${fmtGB(f.bytesPerToken)} (${d.moe ? 'активные веса' : 'веса'} ${fmtGB(w)} + KV ${fmtGB(kv)}) при ${fmtBw(hw.bandwidthGBs)}: ${fmtN(f.genTps, 1)} ток/с. Для ${goal.genTps} ток/с нужно ${fmtBw(d.requiredBandwidthGBs)}.`;
+      if (d.bestQuantMeetsTarget) tips.push(`Квант ${q(d.bestQuantMeetsTarget)}: ${tpsAt(d.bestQuantMeetsTarget)} ток/с. ${C.QUANTS[d.bestQuantMeetsTarget].note[0].toUpperCase() + C.QUANTS[d.bestQuantMeetsTarget].note.slice(1)}.`);
+      else tips.push('Даже самый грубый квант не дотянет до цели: нужна модель поменьше или железо быстрее.');
+      if (d.kvShare > 0.2 && cfg.kvBits > 8) tips.push(`KV-кэш даёт ${pct(kv / f.bytesPerToken)} чтения на токен: KV в Q8_0 ускорит до ${tpsAt(Object.keys(C.QUANTS).find(k => C.QUANTS[k].bpw === cfg.bpw) || 'Q4_K_M', 8)} ток/с, короче контекст — ещё больше.`);
+      if (d.moe) tips.push('У MoE скорость зависит от активных параметров: соседняя модель с меньшим числом активных (A3B вместо A22B) будет заметно быстрее при той же памяти.');
+      tips.push('Спекулятивное декодирование (draft-модель на 0,5–1B того же семейства) даёт ×1,5–2,5 на коде и шаблонном тексте без потери качества.');
+      const cand = C.HARDWARE.filter(h => h.bandwidthGBs >= d.requiredBandwidthGBs && C.usableMemoryBytes(h) >= f.need).sort((a, b) => a.bandwidthGBs - b.bandwidthGBs)[0];
+      tips.push(`Железо: нужно ${fmtBw(d.requiredBandwidthGBs)} и ${Math.ceil(f.need / GB)} ГБ${cand ? `, например ${cand.name}` : ''}.`);
+    } else if (d.bottleneck === 'compute') {
+      title = 'Узкое место: вычисления при обработке промпта';
+      why = `Генерация в норме (${fmtN(f.genTps, 1)} ток/с), но промпт в ${fmtN(goal.promptTokens)} токенов обрабатывается ${fmtN(d.promptSec)} с при ${hw.tflops} TFLOPS. Для ${goal.promptSeconds} с нужно ${fmtN(d.requiredTflops)} TFLOPS.`;
+      tips.push('Кэш промпта: llama.cpp, LM Studio и Ollama не пересчитывают неизменную историю чата, платить придётся только за новые токены. Долгие диалоги страдают меньше, чем кажется.');
+      if (hw.cpuOnly) tips.push('На процессоре обработка промпта самая медленная часть: даже небольшая видеокарта под часть слоёв ускорит её в разы.');
+      else if (hw.unified) tips.push('У Apple обработка промпта слабое место: M-серия в 5–20 раз медленнее видеокарты NVIDIA того же класса по памяти.');
+      tips.push(`Квант не поможет: здесь предел вычислений, а не памяти. Помогут модель поменьше${d.moe ? '' : ' (у MoE считаются только активные параметры)'} или железо с TFLOPS от ${fmtN(d.requiredTflops)}.`);
+    } else {
+      title = 'Узкого места нет';
+      why = `Запас по памяти ${fmtGB(f.usable - f.need)}, генерация ${fmtN(f.genTps, 1)} ток/с при цели ${goal.genTps}, промпт за ${d.promptSec < 1 ? d.promptSec.toFixed(1) : fmtN(d.promptSec)} с.`;
+      if (d.bestQuantMeetsTarget && C.QUANTS[d.bestQuantMeetsTarget].bpw > cfg.bpw) tips.push(`Есть запас на качество: квант ${q(d.bestQuantMeetsTarget)} тоже влезет и даст ${tpsAt(d.bestQuantMeetsTarget)} ток/с.`);
+      const upto = Math.min(maxCtx, model.maxCtx);
+      if (upto > cfg.ctx * 1.5) tips.push(`Контекст можно поднять до ${fmtCtx(upto)}, модель останется целиком в памяти.`);
+      const margins = [['память', f.usable / f.need], ['генерация', f.genTps / goal.genTps], ['обработка промпта', goal.promptSeconds / d.promptSec]].sort((a, b) => a[1] - b[1]);
+      tips.push(`Ближе всего к пределу ${margins[0][0]}: запас ×${margins[0][1].toFixed(1)}. Дальше упрётесь именно туда.`);
+    }
+    $('diag').innerHTML = `<h3>${title}</h3><p>${why}</p><ul>${tips.map(t => `<li>${t}</li>`).join('')}</ul>`;
+  }
+
+  document.querySelectorAll('input, select').forEach(el => el.addEventListener('input', render));
+  modelSel.addEventListener('change', () => { applyModelPreset(); render(); });
+  hwSel.addEventListener('change', () => { applyHwPreset(); render(); });
+  applyModelPreset(); applyHwPreset(); render();
+})();
+</script>
+</body>
+</html>

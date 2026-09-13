@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Калькулятор железа для LLM</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1c1f24; --muted: #6b7280; --line: #e3e6ea;
+    --accent: #2f6fed; --good: #1a9b5b; --ok: #d98a12; --bad: #d64545; --chip: #eef2ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161a; --card: #1d2026; --ink: #e8eaee; --muted: #9aa1ab; --line: #2c3037; --accent: #6b9cff; --chip: #26304a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 -apple-system, "Segoe UI", Roboto, system-ui, sans-serif; }
+  header { padding: 18px 24px 6px; }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 12px 24px 32px; max-width: 1400px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
+  .row { display: grid; grid-template-columns: 170px 1fr; gap: 8px 12px; align-items: center; margin-bottom: 9px; }
+  .row label { color: var(--muted); }
+  select, input[type=number] { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+  input[type=range] { width: 100%; }
+  .inline { display: flex; gap: 8px; align-items: center; }
+  .inline input[type=number] { width: 96px; }
+  .val { min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
+  .hint { color: var(--muted); font-size: 12px; margin: -4px 0 10px; grid-column: 2; }
+  .custom { display: none; border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; }
+  .custom.show { display: block; }
+  .results { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .results { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:last-child { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; }
+  td small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+  .verdict { padding: 10px 14px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; color: #fff; }
+  .verdict.good { background: var(--good); } .verdict.ok { background: var(--ok); } .verdict.bad { background: var(--bad); }
+  .verdict small { display: block; font-weight: 400; opacity: .92; margin-top: 2px; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; margin-left: 6px; }
+  .diag { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .diag h3 { margin: 0 0 4px; font-size: 14px; }
+  .diag p { margin: 0 0 8px; color: var(--muted); }
+  .diag ul { margin: 0; padding-left: 18px; }
+  .diag li { margin-bottom: 5px; }
+  .diag code { font-size: 12px; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+  details { margin-top: 10px; color: var(--muted); font-size: 12px; }
+  details summary { cursor: pointer; }
+  footer { padding: 0 24px 24px; color: var(--muted); font-size: 12px; max-width: 1400px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Калькулятор железа для локальных LLM</h1>
+  <p>Считает память, пропускную способность и вычислительную мощность под модель, и прикидывает скорость на вашем железе. Все числа пересчитываются сразу.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Модель</h2>
+    <div class="row"><label for="model">Модель</label><select id="model"></select></div>
+    <div id="custom" class="custom">
+      <div class="row"><label for="cParams">Параметров всего, млрд</label><input type="number" id="cParams" value="8" min="0.1" step="0.1"></div>
+      <div class="row"><label for="cActive">Активных, млрд</label><input type="number" id="cActive" value="8" min="0.1" step="0.1"></div>
+      <div class="hint">Для плотной модели равно общему числу. Для MoE — сколько работает на каждом токене.</div>
+      <div class="row"><label for="cLayers">Слоёв</label><input type="number" id="cLayers" value="32" min="1" step="1"></div>
+      <div class="row"><label for="cKv">KV-голов</label><input type="number" id="cKv" value="8" min="1" step="1"></div>
+      <div class="row"><label for="cHead">Размер головы</label><input type="number" id="cHead" value="128" min="16" step="16"></div>
+      <div class="row"><label for="cHidden">Скрытая размерность</label><input type="number" id="cHidden" value="4096" min="256" step="256"></div>
+    </div>
+    <div class="row"><label for="quant">Квантование весов</label><select id="quant"></select></div>
+    <div class="hint" id="quantNote"></div>
+    <div class="row"><label for="ctx">Контекст</label>
+      <div class="inline"><input type="range" id="ctx" min="10" max="20" step="0.25" value="13"><span class="val" id="ctxVal"></span></div></div>
+    <div class="row"><label for="kvq">Квантование KV-кэша</label><select id="kvq"></select></div>
+    <div class="row"><label for="tps">Удобная генерация</label>
+      <div class="inline"><input type="number" id="tps" value="10" min="1" step="1"> ток/с</div></div>
+    <div class="hint">10 ток/с — скорость чтения. 20–30 — уже комфортно для кода и агентов.</div>
+    <div class="row"><label for="prompt">Промпт</label>
+      <div class="inline"><input type="number" id="prompt" value="4096" min="128" step="128"> токенов за <input type="number" id="promptSec" value="10" min="1" step="1"> с</div></div>
+    <div class="hint">Сколько ждать, пока модель прочитает вставленный документ или историю чата.</div>
+  </section>
+
+  <section class="card">
+    <h2>Железо</h2>
+    <div class="row"><label for="hw">Пресет</label><select id="hw"></select></div>
+    <div class="row"><label for="hwMem">Память ускорителя, ГБ</label><div class="inline"><input type="number" id="hwMem" min="1" step="1"><select id="hwMemOpt" style="display:none"></select></div></div>
+    <div class="hint" id="hwMemNote"></div>
+    <div class="row"><label for="hwBw">Пропускная способность, ГБ/с</label><input type="number" id="hwBw" min="1" step="1"></div>
+    <div class="row"><label for="hwTf">Вычисления, TFLOPS (FP16)</label><input type="number" id="hwTf" min="0.1" step="0.1"></div>
+    <div id="sysBlock">
+      <div class="row"><label for="sysMem">ОЗУ системы, ГБ</label><input type="number" id="sysMem" min="1" step="1"></div>
+      <div class="row"><label for="sysBw">ОЗУ, ГБ/с</label><input type="number" id="sysBw" min="1" step="1"></div>
+      <div class="hint">Если модель не влезает в видеопамять, часть слоёв уйдёт в ОЗУ. DDR4 двухканал ≈ 50, DDR5 ≈ 90 ГБ/с.</div>
+    </div>
+    <details><summary>Откуда числа в пресетах</summary>
+      Память и пропускная способность — паспортные (Mac и коробки сверены со спецификациями производителей в сентябре 2026). TFLOPS — практичные FP16 без разрежённости: у NVIDIA это половина маркетинговых «tensor» цифр, у Apple M1–M4 — пиковые FP32, у M5/M6 с нейроускорителями в GPU взято вдвое больше M4-аналога (консервативно к заявленным ×3–4). Коробки на GB10 (DGX Spark и клоны) и на Strix Halo — одна платформа под разными именами, различаются корпусом и ценой. Для единой памяти учтено, что системе остаётся 1/3 (≤36 ГБ) или 1/4 объёма: так по умолчанию делает macOS, и столько же (96 из 128 ГБ) отдают GPU коробки на Strix Halo.
+    </details>
+  </section>
+
+  <div class="results">
+    <section class="card">
+      <h2>Минимум железа под эту модель</h2>
+      <table id="reqTable"></table>
+      <details><summary>Как считается</summary>
+        Память = параметры × бит на вес ÷ 8 + KV-кэш на токен × контекст + накладные (0,75 ГБ + 4 % весов + буфер вычислений под контекст, с flash attention).
+        KV на токен = 2 × слои × KV-головы × размер головы × байт (для MLA — один вектор, для скользящего окна локальные слои держат только окно).
+        Пропускная способность = байт на токен × целевая скорость ÷ 0,7. TFLOPS = 2 × активные параметры × токенов промпта в секунду ÷ 0,5.
+      </details>
+    </section>
+    <section class="card">
+      <h2>Прогноз на выбранном железе</h2>
+      <div id="verdict" class="verdict"></div>
+      <table id="fitTable"></table>
+      <div class="diag" id="diag"></div>
+    </section>
+  </div>
+</main>
+<footer>Оценки, а не измерения: реальная скорость зависит от движка (llama.cpp, MLX, vLLM), драйверов и настроек. Обычно попадание в ±30 %. Тесты формул: <code>node test.js</code>.</footer>
