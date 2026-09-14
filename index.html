@@ -196,6 +196,10 @@ var LLMCalc = (() => {
   m('Qwen 3.5–3.8', 'Qwen3.5 397B-A17B (MoE)',      397,  17,   60, 2, 256, 4096, 262144, { kvLayers: 15 });
   m('Qwen 3.5–3.8', 'Qwen3.8 27B',                  27,   27,   64, 4, 256, 5120, 262144, { kvLayers: 16 });
   m('Qwen 3.5–3.8', 'Qwen3.8-Max 2.4T-A95B (MoE)',      2400, 95,   92, 4, 256, 8192, 262144, { kvLayers: 23 });
+  // Flash-Next: 125B трансформер + 51B n-gram-таблиц + 4B MTP-голова. В GGUF грузится ~176B (без MTP);
+  // в MLX n-gram-таблицы можно выгрузить на SSD, тогда в памяти ~125B.
+  m('Qwen 3.5–3.8', 'Qwen3.8-Flash-Next 176B-A6B (MoE, GGUF)', 176, 6, 48, 2, 256, 2560, 262144, { kvLayers: 12, note: 'из них 51B — n-gram-таблицы' });
+  m('Qwen 3.5–3.8', 'Qwen3.8-Flash-Next 125B-A6B (MoE, MLX, n-gram на SSD)', 125, 6, 48, 2, 256, 2560, 262144, { kvLayers: 12, note: 'n-gram-таблицы выгружены на SSD' });
   // --- Google Gemma
   m('Gemma', 'Gemma 2 2B',                2.6,  2.6,  26, 4,  256, 2304,  8192,  SW(4096, 1/2));
   m('Gemma', 'Gemma 2 9B',                9.2,  9.2,  42, 8,  256, 3584,  8192,  SW(4096, 1/2));
@@ -245,7 +249,8 @@ var LLMCalc = (() => {
   m('GLM', 'GLM-4 9B',                    9.4,  9.4,  40, 2,  128, 4096,  131072);
   m('GLM', 'GLM-4.5 Air 106B-A12B (MoE)', 106,  12,   46, 8,  128, 4096,  131072);
   m('GLM', 'GLM-4.5 / 4.6 355B-A32B (MoE)', 355, 32,  92, 8,  128, 5120,  131072);
-  m('GLM', 'GLM-5 / 5.1 / 5.2 744B-A40B (MoE, MLA)', 744, 40, 78, 1, 576, 6144, 1048576, MLA);
+  m('GLM', 'GLM-5 / 5.1 / 5.2 / 5.3 744B-A40B (MoE, MLA)', 744, 40, 78, 1, 576, 6144, 1048576, MLA);
+  m('GLM', 'GLM-5.3-Flash 320B-A18B (MoE, гибрид, MLA)', 320, 18, 45, 1, 512, 4096, 1048576, { kvFactor: 1, kvLayers: 11 });
   // --- Moonshot Kimi
   m('Kimi', 'Kimi Linear 48B-A3B (MoE, гибрид)', 48, 3, 27, 1, 576, 2304, 1048576, { ...MLA, kvLayers: 7 });
   m('Kimi', 'Kimi K2 / K2 Thinking 1T-A32B (MoE, MLA)', 1026, 32, 61, 1, 576, 7168, 131072, MLA);
@@ -264,6 +269,7 @@ var LLMCalc = (() => {
   m('Китайские MoE', 'ERNIE 4.5 21B-A3B (MoE)', 21, 3, 28, 4, 128, 2560, 131072);
   m('Китайские MoE', 'ERNIE 4.5 300B-A47B (MoE)', 300, 47, 54, 8, 128, 8192, 131072);
   m('Китайские MoE', 'Seed-OSS 36B',      36,   36,   64, 8,  128, 5120,  524288);
+  m('Китайские MoE', 'Step 3.5 Flash 196B-A11B (MoE)', 196, 11, 45, 8, 128, 4096, 262144, SW(512, 3/4));
   // --- NVIDIA Nemotron 3 (гибрид Mamba-2 + MoE, внимание лишь в части слоёв)
   m('NVIDIA', 'Nemotron 3 Nano 30B-A3B',  31.6, 3.5,  52, 2,  128, 2688,  262144, { kvLayers: 6 });
   m('NVIDIA', 'Nemotron 3 Super 120B-A12B', 120, 12,  88, 2,  128, 4096,  262144, { kvLayers: 9 });
