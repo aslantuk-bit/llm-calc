@@ -18,7 +18,7 @@
 
 ## Откуда числа
 
-Архитектуры моделей 2026 года (Qwen 3.5/3.6/3.8, Gemma 4, DeepSeek V4, GLM-5.x, Kimi K2.6/K3, MiniMax M2.7/M3, Mistral Small 4 / Medium 3.5, Nemotron 3, Laguna, MiMo, Ring, OLMo 3) взяты из `config.json` на Hugging Face 13.09.2026. Две записи помечены как оценка: Mistral Large 3 (конфиг закрыт) и число активных параметров у Gemma 4 E2B/E4B. Не включены модели, существование которых не удалось подтвердить на Hugging Face (Llama 5, Phi-5, Qwen3.8-180B).
+Архитектуры моделей 2026 года (Qwen 3.5/3.6/3.8, Gemma 4, DeepSeek V4, GLM-5.x, Kimi K2.6/K3, MiniMax M2.7/M3, Mistral Small 4 / Medium 3.5, Nemotron 3, Laguna, MiMo, Ring, OLMo 3) взяты из `config.json` на Hugging Face 13.09.2026. 20.10.2026 добавлены DeepSeek V4.1 Flash, MiMo-V2.6 Pro/Flash, Step 5 Preview, Nemotron 3.5 (Lightning, Bolt, Super VL), Meta Muse Spark Open, Reflection Beam 1.0, Marin Snowball. Mistral Large 4, Qwen3.7 Plus и MiniMax-M3.1-Flash не включены: на 20.10.2026 их весов нет на Hugging Face. Две записи помечены как оценка: Mistral Large 3 (конфиг закрыт) и число активных параметров у Gemma 4 E2B/E4B. Не включены модели, существование которых не удалось подтвердить на Hugging Face (Llama 5, Phi-5, Qwen3.8-180B).
 
 Железо: спецификации Apple (Mac mini, Mac Studio, MacBook Pro/Air, iMac по состоянию на сентябрь 2026, включая M5 Pro/Max/Ultra и M6), NVIDIA (GB10-коробки, Jetson, DGX Station), AMD (Strix Halo и клоны), Intel Panther Lake, Qualcomm X2 Elite. TFLOPS у M5/M6 — оценка ×2 к M4-аналогу.
 
