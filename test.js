@@ -385,6 +385,47 @@ test('кванты и KV: реальные биты и формат', () => {
   near(C.KV_QUANTS.Q4_0, 4.5, 1e-9, 'q4_0 KV 4.5 бит');
 });
 
+// Сборки Qwen3.8-Flash-Next на MacBook Pro M5 Max 128 ГБ: замеры MTPLX 2.11.3 и Strata (mtplx.com, Strata docs/MAC.md, 01.11.2026)
+const m5max128 = { ...C.HARDWARE.find(h => h.name.includes('MacBook Pro') && h.name.includes('M5 Max 40')), memGB: 128 };
+const flashNext = C.MODELS.find(md => md.name.startsWith('Qwen3.8-Flash-Next'));
+const rowOf = (rows, label) => rows.find(r => r.build.label === label);
+
+test('сборки Flash-Next: биты из размера файла, 180 млрд параметров', () => {
+  near(flashNext.params, 180e9, 1, 'параметров по карточке');
+  const b = C.buildsFor(flashNext).find(x => x.label === 'Unsloth UD-Q4_K_XL');
+  near(C.buildBpw(flashNext, b), 111.33 * 8 / 180, 1e-9, 'UD-Q4_K_XL');
+  assert.strictEqual(C.buildsFor({ name: 'Llama 2 7B' }).length, 0);
+});
+
+test('сборки Flash-Next на M5 Max 128: MTPLX влезает до 262K и попадает в замер', () => {
+  const rows = C.compareBuilds(flashNext, m5max128, { kvBits: 16, ctxs: [111616, 204800] });
+  const opt = rowOf(rows, 'MTPLX Optimized Speed');
+  assert.strictEqual(opt.engine, 'mlx');
+  assert.strictEqual(opt.maxCtx, 262144);
+  // замер: 61,8 ток/с на 109K, 50,3 на 200K
+  near(opt.runs[0].fit.genTps, 61.8, 61.8 * 0.2, 'MTPLX 109K');
+  near(opt.runs[1].fit.genTps, 50.3, 50.3 * 0.2, 'MTPLX 200K');
+});
+
+test('сборки Flash-Next на M5 Max 128: таблицы в памяти — только с sysctl, NVFP4 не для Mac', () => {
+  const rows = C.compareBuilds(flashNext, m5max128, { kvBits: 16 });
+  const plain = rowOf(rows, 'MLX 4-bit');
+  assert.strictEqual(plain.runs[0].fit.status, 'nofit');
+  assert.ok(plain.runs[0].raised, 'с поднятым лимитом GPU влезает');
+  assert.strictEqual(rowOf(rows, 'NVIDIA NVFP4').engine, null);
+  assert.strictEqual(rowOf(rows, 'Unsloth UD-Q4_K_XL').engine, 'strata');
+});
+
+test('Strata на M5 Max: Flash-Next UD-Q4_K_XL ≈ 94 ток/с, DeepSeek V4.1 2,25 бита — 13–18', () => {
+  const f = C.fit({ model: flashNext, bpw: 111.33 * 8 / 180, ctx: 4096, kvBits: 16, engine: 'strata', promptTokens: 4096 }, m5max128);
+  assert.strictEqual(f.status, 'fits');
+  near(f.genTps, 94, 94 * 0.2, 'Flash-Next с MTP');
+  const ds = C.MODELS.find(md => md.name.startsWith('DeepSeek V4.1 Flash'));
+  const g = C.fit({ model: ds, bpw: 2.25, ctx: 32768, kvBits: 16, engine: 'strata', promptTokens: 4096 }, m5max128);
+  assert.strictEqual(g.status, 'ssd');
+  assert.ok(g.genTps >= 11 && g.genTps <= 20, `DeepSeek V4.1 на Strata: ${g.genTps}`);
+});
+
 let failed = 0;
 for (const t of tests) {
   try { t.fn(); console.log('  ok   ' + t.name); }

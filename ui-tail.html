@@ -89,15 +89,34 @@
   // --- вывод
   const row = (label, value, note) => `<tr><td>${label}${note ? `<small>${note}</small>` : ''}</td><td>${value}</td></tr>`;
 
+  // Выбранная в таблице сборка: в списке квантов появляется её строка с точными битами
+  let picked = null;
+  function dropPicked() {
+    if (!picked) return;
+    if (quantSel.value === 'build') quantSel.value = picked.build.quant ?? 'Q4_K_M';
+    quantSel.querySelector('option[value="build"]')?.remove();
+    picked = null;
+  }
+  function pickBuild(x) {
+    dropPicked();
+    picked = { build: x.build, bpw: x.bpw };
+    const o = new Option(`Сборка: ${x.build.label} · ${fmtN(x.bpw, 2)} бит`, 'build');
+    quantSel.add(o, 0); quantSel.value = 'build';
+    if (x.engine) engSel.value = x.engine;
+  }
+
   function render() {
-    const model = currentModel(), quant = C.QUANTS[quantSel.value];
+    const model = currentModel();
+    const pb = quantSel.value === 'build' && picked ? picked.build : null;
+    const quant = pb ? { bpw: picked.bpw, fmt: C.QUANTS[pb.quant]?.fmt ?? 'any', label: pb.label, note: `${pb.repo}${pb.note ? ' — ' + pb.note : ''}` } : C.QUANTS[quantSel.value];
     const ctx = Math.round(2 ** +$('ctx').value), kvBits = C.KV_QUANTS[kvSel.value];
     $('ctxVal').textContent = fmtCtx(ctx);
     $('quantNote').textContent = quant.note;
     const goal = { genTps: +$('tps').value, promptTokens: +$('prompt').value, promptSeconds: +$('promptSec').value };
     const hw = currentHw();
     // Оболочка: «Авто» — лучшая из тех, что запускаются; выбранная вручную — как есть, даже если хуже
-    const base0 = { model, bpw: quant.bpw, ctx, kvBits, promptTokens: goal.promptTokens };
+    const base0 = { model, bpw: quant.bpw, ctx, kvBits, promptTokens: goal.promptTokens,
+      ...(pb && pb.ssd !== undefined ? { ssd: pb.ssd } : {}), ...(pb && pb.mtp === false ? { mtp: false } : {}) };
     const auto = engSel.value === 'auto';
     const best = C.bestEngine(base0, hw);
     const engine = auto ? (best ? best.engine : 'llama.cpp') : engSel.value;
@@ -158,7 +177,7 @@
     vEl.innerHTML = titles[v] + `<small>${sub}</small>`;
 
     const ctxStatuses = f.status === 'experts' ? ['fits', 'experts'] : ['fits'];
-    const maxCtx = engOk ? C.maxContext({ model, bpw: quant.bpw, kvBits: kvUsed, engine, promptTokens: goal.promptTokens }, hw, ctxStatuses) : 0;
+    const maxCtx = engOk ? C.maxContext({ ...base0, kvBits: kvUsed, engine }, hw, ctxStatuses) : 0;
     const genHow = `${fmtBw(hw.bandwidthGBs)} × 0,7 ÷ ${fmtGB(bytes)} на токен + задержка ${fmtN((f.latency ?? lat) * 1000, 1)} мс`
       + (f.status === 'offload' ? ', часть слоёв через ОЗУ' : f.status === 'experts' ? ', эксперты через ОЗУ' : f.status === 'ssd' ? ', промахи кэша — с SSD' : '')
       + (f.mtpGain > 1 ? `; с MTP ×${String(f.mtpGain).replace('.', ',')}` : model.mtp ? '; у модели есть MTP-голова, но эта оболочка её здесь не использует' : '');
@@ -173,6 +192,7 @@
       row('Максимальный контекст', maxCtx ? fmtCtx(Math.min(maxCtx, model.maxCtx)) + (maxCtx > model.maxCtx ? '<span class="chip">предел модели</span>' : '') : '—', f.status === 'experts' ? 'при котором внимание и KV остаются на видеокарте' : 'при котором модель целиком в памяти ускорителя') +
       row('Время до первого слова', f.prefillTps ? (promptSec + 1 / f.genTps).toFixed(1) + ' с' : '—', 'промпт + первый токен');
 
+    renderBuilds(model, hw, goal, kvBits, pb, engine);
     if (engOk) renderDiag(cfg, hw, goal, f, maxCtx);
     else $('diag').innerHTML = `<h3>Оболочка здесь не запускается</h3><p>${esc(E.label)}: ${esc(E.note)}</p>`
       + (best ? `<ul><li>Лучшая для этого железа — <b>${esc(C.ENGINES[best.engine].label)}</b>: ${best.fit.status === 'nofit' ? 'но и она не вмещает модель' : `около ${fmtN(best.fit.genTps, 1)} ток/с`}.</li></ul>` : '');
@@ -251,8 +271,44 @@
     $('diag').innerHTML = `<h3>${title}</h3><p>${why}</p><ul>${tips.map(t => `<li>${t}</li>`).join('')}</ul>`;
   }
 
+  // Готовые сборки: строка — конкретный репозиторий; щелчок ставит его квант и оболочку в форму
+  function renderBuilds(model, hw, goal, kvBits, pb, engine) {
+    const rows = C.compareBuilds(model, hw, { kvBits, promptTokens: goal.promptTokens });
+    $('buildsCard').style.display = rows.length ? '' : 'none';
+    if (!rows.length) return;
+    const ctxs = C.COMPARE_CTX.filter(c => c <= model.maxCtx);
+    const cell = r => {
+      if (!r) return '<span class="dim">предел</span>';
+      const f = r.fit;
+      if (f.status === 'fits' || f.status === 'experts') return fmtN(f.genTps, 1) + (f.status === 'experts' ? ' <span class="dim">эксп. в ОЗУ</span>' : '');
+      if (r.raised) return fmtN(r.raised.genTps, 1) + ' <span class="dim">с sysctl</span>';
+      if (f.status === 'ssd' || f.status === 'offload') return `<span class="dim">${fmtN(f.genTps, 1)} ${f.status === 'ssd' ? 'с SSD' : 'выгрузка'}</span>`;
+      return '<span class="dim">не влезает</span>';
+    };
+    const ctxCell = x => x.maxCtx ? fmtCtx(x.maxCtx) + (x.maxCtxRaised > x.maxCtx * 1.1 ? ` <span class="dim">/ ${fmtCtx(x.maxCtxRaised)} с sysctl</span>` : '')
+      : x.maxCtxRaised ? `<span class="dim">${fmtCtx(x.maxCtxRaised)} с sysctl</span>` : '—';
+    const head = `<tr><th>Сборка</th><th>Оболочка</th><th class="n">Файлы</th><th class="n">Бит на вес</th><th>Качество</th>${ctxs.map(c => `<th class="n">ток/с при ${fmtCtx(c)}</th>`).join('')}<th class="n">Контекст до</th></tr>`;
+    const body = rows.map((x, i) => {
+      const b = x.build, cur = b === pb && x.engine === engine;
+      return `<tr class="pick${cur ? ' cur' : ''}" data-i="${i}"><td>${esc(b.label)}${b.rec ? '<span class="chip">' + esc(b.rec) + '</span>' : ''}<small>${esc(b.repo)}${b.note ? ' — ' + esc(b.note) : ''}</small></td>`
+        + `<td>${x.engine ? esc(C.ENGINES[x.engine].label.split(' (')[0]) : '<span class="dim">не здесь</span>'}</td>`
+        + `<td class="n">${fmtN(b.sizeGB)} ГБ</td><td class="n">${fmtN(x.bpw, 2)}</td><td>${esc(b.q ?? '')}</td>`
+        + ctxs.map(c => `<td class="n">${x.engine ? cell(x.runs.find(r => r.ctx === c)) : '—'}</td>`).join('')
+        + `<td class="n">${x.engine ? ctxCell(x) : '—'}</td></tr>`;
+    }).join('');
+    $('buildsTable').innerHTML = head + body;
+    $('buildsTable').querySelectorAll('tr.pick').forEach(tr => tr.addEventListener('click', () => {
+      pickBuild(rows[+tr.dataset.i]);
+      render();
+    }));
+    const B = C.buildsInfo(model);
+    $('buildsNote').innerHTML = (B?.note ? B.note + ' ' : '') + 'Скорость — генерация на выбранном железе, KV-кэш как в форме (если оболочка его умеет). «С sysctl» — влезет, если поднять лимит памяти GPU на Mac до 90 %. Щелчок по строке ставит квант и оболочку сборки в форму выше.';
+    $('buildsHow').innerHTML = B?.how ? `<summary>${esc(B.howTitle ?? 'Откуда данные')}</summary>${B.how}` : '';
+    $('buildsHow').style.display = B?.how ? '' : 'none';
+  }
+
   document.querySelectorAll('input, select').forEach(el => el.addEventListener('input', render));
-  modelSel.addEventListener('change', () => { applyModelPreset(); render(); });
+  modelSel.addEventListener('change', () => { dropPicked(); applyModelPreset(); render(); });
   hwSel.addEventListener('change', () => { applyHwPreset(); render(); });
   applyModelPreset(); applyHwPreset(); render();
 })();
