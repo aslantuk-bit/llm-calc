@@ -5,6 +5,7 @@
   const fmtN = (n, d = 0) => n.toLocaleString('ru-RU', { maximumFractionDigits: d });
   const fmtCtx = n => n >= 1024 ? (n / 1024) % 1 === 0 ? (n / 1024) + 'k' : (n / 1024).toFixed(1) + 'k' : String(n);
   const fmtBw = g => g >= 1000 ? (g / 1000).toFixed(2) + ' ТБ/с' : fmtN(g) + ' ГБ/с';
+  const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
   // --- заполнение списков
   const modelSel = $('model');
@@ -19,7 +20,10 @@
   for (const k in C.QUANTS) quantSel.add(new Option(C.QUANTS[k].label + ' · ' + C.QUANTS[k].bpw + ' бит', k));
   quantSel.value = 'Q4_K_M';
   const kvSel = $('kvq');
-  for (const k in C.KV_QUANTS) kvSel.add(new Option(k + ' · ' + C.KV_QUANTS[k] + ' бит', k));
+  for (const k in C.KV_QUANTS) kvSel.add(new Option(C.KV_LABELS[k] + ' · ' + String(C.KV_QUANTS[k]).replace('.', ',') + ' бит', k));
+  const engSel = $('engine');
+  engSel.add(new Option('Авто — лучшая для этого железа', 'auto'));
+  for (const k in C.ENGINES) engSel.add(new Option(C.ENGINES[k].label, k));
   const hwSel = $('hw');
   const groups = {};
   C.HARDWARE.forEach((h, i) => {
@@ -37,18 +41,19 @@
     }
     return C.MODELS[+modelSel.value];
   }
-  let hwUnified = true, hwCpuOnly = false;
+  let hwUnified = true, hwCpuOnly = false, hwExtra = {};
   function currentHw() {
     return { unified: hwUnified, cpuOnly: hwCpuOnly, memGB: +$('hwMem').value, bandwidthGBs: +$('hwBw').value, tflops: +$('hwTf').value,
-      sysMemGB: +$('sysMem').value, sysBandwidthGBs: +$('sysBw').value, sysTflops: 1 };
+      sysMemGB: +$('sysMem').value, sysBandwidthGBs: +$('sysBw').value, sysTflops: 1, ...hwExtra };
   }
   function applyHwPreset() {
     const v = hwSel.value;
     const memOpt = $('hwMemOpt');
-    if (v === 'custom') { hwUnified = false; hwCpuOnly = false; memOpt.style.display = 'none'; $('hwMem').style.display = ''; $('hwMemNote').textContent = 'Дискретная карта: вся память доступна модели. Для единой памяти (Mac, APU) выберите похожий пресет и поправьте числа.'; }
+    if (v === 'custom') { hwUnified = false; hwCpuOnly = false; hwExtra = { vendor: 'nvidia', ssdGBs: 6 }; memOpt.style.display = 'none'; $('hwMem').style.display = ''; $('hwMemNote').textContent = 'Дискретная карта: вся память доступна модели. Для единой памяти (Mac, APU) выберите похожий пресет и поправьте числа.'; }
     else {
       const h = C.HARDWARE[+v];
       hwUnified = h.unified; hwCpuOnly = !!h.cpuOnly;
+      hwExtra = { vendor: h.vendor, ssdGBs: h.ssdGBs, ...(h.gpuShare ? { gpuShare: h.gpuShare } : {}) };
       $('hwBw').value = h.bandwidthGBs; $('hwTf').value = h.tflops;
       $('sysMem').value = h.sysMemGB; $('sysBw').value = h.sysBandwidthGBs;
       if (h.memOptions) {
@@ -56,6 +61,7 @@
         memOpt.value = h.memGB; memOpt.style.display = ''; $('hwMem').style.display = 'none'; $('hwMem').value = h.memGB;
       } else { memOpt.style.display = 'none'; $('hwMem').style.display = ''; $('hwMem').value = h.memGB; }
       $('hwMemNote').textContent = h.cpuOnly ? 'Только процессор: под модель уходит ~85 % ОЗУ, остальное — системе.'
+        : h.gpuShare ? `Единая память: GPU получает ${Math.round(h.gpuShare * 100)} % общего объёма.`
         : h.unified ? 'Единая память: GPU получает 2/3 (≤36 ГБ) или 3/4 (больше) от общего объёма.' : 'Дискретная карта: вся видеопамять доступна модели.';
     }
     $('sysBlock').style.display = hwUnified ? 'none' : '';
@@ -88,38 +94,62 @@
     const ctx = Math.round(2 ** +$('ctx').value), kvBits = C.KV_QUANTS[kvSel.value];
     $('ctxVal').textContent = fmtCtx(ctx);
     $('quantNote').textContent = quant.note;
-    const cfg = { model, bpw: quant.bpw, ctx, kvBits };
     const goal = { genTps: +$('tps').value, promptTokens: +$('prompt').value, promptSeconds: +$('promptSec').value };
+    const hw = currentHw();
+    // Оболочка: «Авто» — лучшая из тех, что запускаются; выбранная вручную — как есть, даже если хуже
+    const base0 = { model, bpw: quant.bpw, ctx, kvBits, promptTokens: goal.promptTokens };
+    const auto = engSel.value === 'auto';
+    const best = C.bestEngine(base0, hw);
+    const engine = auto ? (best ? best.engine : 'llama.cpp') : engSel.value;
+    const engOk = C.engineOk(engine, model, hw);
+    const kvUsed = C.kvFor(engine, kvBits);
+    const cfg = { ...base0, engine, kvBits: kvUsed };
+    const E = C.ENGINES[engine];
+    const fmtNative = E.fmts.includes(quant.fmt);
+    $('engineNote').innerHTML = (auto ? `Выбрана <b>${esc(E.label)}</b>. ` : '') + esc(E.note)
+      + (!engOk ? ' <b>На этом железе или с этой моделью она не запустится.</b>' : '')
+      + (kvUsed !== kvBits ? ` KV-кэш ${kvBits} бит она не умеет — посчитано с ${String(kvUsed).replace('.', ',')}.` : '')
+      + (!fmtNative ? ` Квант ${quant.label} для неё не родной: возьмите аналог с тем же числом бит.` : '');
 
     const mem = C.memoryNeeded(cfg);
     const bytes = C.bytesPerGeneratedToken(cfg);
     const kvTok = C.kvBytesPerToken(model, kvBits, ctx);
-    const reqBw = C.requiredBandwidthGBs(bytes, goal.genTps);
+    const f = engOk ? C.fit(cfg, hw) : { ...C.fit(cfg, hw), status: 'nofit', genTps: 0, prefillTps: 0 };
+    const lat = C.stepLatencySec(model, hw);
+    const reqBw = C.requiredBandwidthGBs(bytes, goal.genTps / f.mtpGain, lat);
     const reqTf = C.requiredTflops(model, goal.promptTokens, goal.promptSeconds);
     const moe = model.active < model.params;
     const macNeed = mem.total <= 36 * GB * 2 / 3 ? mem.total * 3 / 2 : mem.total * 4 / 3;
+    // MoE с экспертами в ОЗУ: на видеокарте только внимание, общие веса и KV
+    const sharedB = C.weightsBytes(model.active, quant.bpw) * C.NON_EXPERT_SHARE;
+    const expVram = sharedB + mem.kv + mem.overhead, expRam = mem.weights - sharedB;
 
     $('reqTable').innerHTML =
-      row('Память под модель', fmtGB(mem.total), `веса ${fmtGB(mem.weights)} + KV ${fmtGB(mem.kv)} + накладные ${fmtGB(mem.overhead)}`) +
+      row('Память под модель', fmtGB(mem.total), `веса ${fmtGB(mem.weights)} + KV ${fmtGB(mem.kv)} + накладные ${fmtGB(mem.overhead)}${mem.ssd ? `; ещё ${fmtGB(mem.ssd)} таблиц — на SSD (${esc(E.label)})` : ''}`) +
       row('Дискретная видеокарта', `от ${Math.ceil(mem.total / GB)} ГБ VRAM`, 'целиком в видеопамяти') +
       row('Mac / единая память', `от ${Math.ceil(macNeed / GB)} ГБ`, 'с учётом доли, которую macOS оставляет системе') +
       row('Только процессор', `от ${Math.ceil(mem.total / GB / 0.85)} ГБ ОЗУ`, 'и не меньше 8 быстрых ядер; скорость см. справа') +
-      row(`Пропускная способность под ${goal.genTps} ток/с`, fmtBw(reqBw), `на токен читается ${fmtGB(bytes)}${moe ? ' (только активные ' + fmtN(model.active / 1e9, 1) + ' млрд)' : ''}`) +
+      (moe && model.active < model.params * 0.5 ? row('Видеокарта + ОЗУ (эксперты в ОЗУ)', `от ${Math.ceil(expVram / GB)} ГБ VRAM + ${Math.ceil(expRam / GB / 0.85)} ГБ ОЗУ`,
+        'llama.cpp --n-cpu-moe, KTransformers, Strata; лишняя видеопамять уходит под часть экспертов и ускоряет') : '') +
+      row(`Пропускная способность под ${goal.genTps} ток/с`, isFinite(reqBw) ? fmtBw(reqBw) : 'недостижимо',
+        `на токен читается ${fmtGB(bytes)}${moe ? ' (только активные ' + fmtN(model.active / 1e9, 1) + ' млрд)' : ''}; плюс ${fmtN(lat * 1000, 1)} мс задержки на слоях${f.mtpGain > 1 ? `; MTP даёт ×${String(f.mtpGain).replace('.', ',')}` : ''}`) +
       row(`Вычисления под ${fmtN(goal.promptTokens)} токенов за ${goal.promptSeconds} с`, fmtN(reqTf, reqTf < 10 ? 1 : 0) + ' TFLOPS', 'FP16, практичные; обработка промпта') +
-      row('Место на диске', fmtGB(mem.weights * 1.02), 'файл весов; держите запас под другие кванты') +
+      row('Место на диске', fmtGB((mem.weights + mem.ssd) * 1.02), 'файл весов; держите запас под другие кванты') +
       row('KV-кэш на 1 токен', fmtN(kvTok / 1024, 1) + ' КБ', `${model.layers} слоёв${model.kvLayers ? ' (KV в ' + model.kvLayers + ')' : ''} × ${model.kvHeads} KV-голов × ${model.headDim}${model.kvFactor === 1 ? ' (MLA)' : ''}${model.kvScale ? ' × ' + model.kvScale : ''}${model.window ? ', окно ' + model.window : ''}${model.note ? '; ' + model.note : ''}`);
 
-    const hw = currentHw();
-    const f = C.fit(cfg, hw);
     const v = C.verdict(f, goal);
     const vEl = $('verdict');
     vEl.className = 'verdict ' + v;
     const titles = { good: 'Удобно', ok: 'Терпимо', bad: 'Не годится' };
     const promptSec = f.prefillTps ? goal.promptTokens / f.prefillTps : Infinity;
     let sub = '';
-    if (f.status === 'nofit') sub = `Нужно ${fmtGB(f.need)}, доступно ${fmtGB(f.usable)}${hw.unified ? '' : ' + ОЗУ ' + fmtGB(hw.sysMemGB * GB * 0.85)}. Возьмите квант поменьше или сократите контекст.`;
+    if (!engOk) sub = `${E.label} не запускается на этом железе или с этой моделью. Выберите «Авто» или другую оболочку.`;
+    else if (f.status === 'nofit') sub = `Нужно ${fmtGB(f.need)}, доступно ${fmtGB(f.usable)}${hw.unified ? '' : ' + ОЗУ ' + fmtGB(hw.sysMemGB * GB * 0.85)}. Возьмите квант поменьше или сократите контекст.`;
     else {
-      const parts = [f.status === 'offload' ? `в видеопамять влезает ${Math.round(f.gpuFraction * 100)} %, остальное в ОЗУ` : 'влезает целиком'];
+      const where = { fits: 'влезает целиком', offload: `в видеопамять влезает ${Math.round(f.gpuFraction * 100)} %, остальные слои в ОЗУ`,
+        experts: `эксперты MoE в ОЗУ (${fmtGB(f.ramNeed)}), остальное на видеокарте`,
+        ssd: `эксперты подкачиваются с SSD, в памяти горячие (попадание ~${Math.round(f.ssdHit * 100)} %)` };
+      const parts = [where[f.status] + ` — ${E.label}`];
       parts.push(f.genTps >= goal.genTps ? `генерация ${fmtN(f.genTps, 1)} ток/с при цели ${goal.genTps}` : `генерация ${fmtN(f.genTps, 1)} ток/с медленнее цели ${goal.genTps}`);
       if (promptSec > goal.promptSeconds) parts.push(`промпт ${fmtN(promptSec)} с вместо ${goal.promptSeconds}`);
       sub = parts.join('; ') + '.';
@@ -127,19 +157,27 @@
     }
     vEl.innerHTML = titles[v] + `<small>${sub}</small>`;
 
-    const maxCtx = C.maxContext({ model, bpw: quant.bpw, kvBits }, hw);
+    const ctxStatuses = f.status === 'experts' ? ['fits', 'experts'] : ['fits'];
+    const maxCtx = engOk ? C.maxContext({ model, bpw: quant.bpw, kvBits: kvUsed, engine, promptTokens: goal.promptTokens }, hw, ctxStatuses) : 0;
+    const genHow = `${fmtBw(hw.bandwidthGBs)} × 0,7 ÷ ${fmtGB(bytes)} на токен + задержка ${fmtN((f.latency ?? lat) * 1000, 1)} мс`
+      + (f.status === 'offload' ? ', часть слоёв через ОЗУ' : f.status === 'experts' ? ', эксперты через ОЗУ' : f.status === 'ssd' ? ', промахи кэша — с SSD' : '')
+      + (f.mtpGain > 1 ? `; с MTP ×${String(f.mtpGain).replace('.', ',')}` : model.mtp ? '; у модели есть MTP-голова, но эта оболочка её здесь не использует' : '');
     $('fitTable').innerHTML =
-      row('Доступно памяти', fmtGB(f.usable), hw.unified ? `из ${hw.memGB} ГБ единой памяти` : `${hw.memGB} ГБ видеопамяти`) +
-      row('Нужно', fmtGB(f.need), f.status === 'fits' ? `запас ${fmtGB(f.usable - f.need)}` : `не хватает ${fmtGB(f.need - f.usable)}`) +
-      row('Генерация', f.genTps ? fmtN(f.genTps, 1) + ' ток/с' : '—', `${fmtBw(hw.bandwidthGBs)} × 0,7 ÷ ${fmtGB(bytes)} на токен${f.status === 'offload' ? ', часть через ОЗУ' : ''}`) +
+      row('Оболочка', esc(E.label) + (auto ? '<span class="chip">авто</span>' : ''), engOk ? '' : 'не запускается здесь') +
+      row('Доступно памяти', fmtGB(f.usable), (hw.unified ? `из ${hw.memGB} ГБ единой памяти` : `${hw.memGB} ГБ видеопамяти`) + (E.usable ? `; ${E.label.split(' ')[0]} занимает ${Math.round(E.usable * 100)} %` : '')) +
+      row('Нужно', fmtGB(f.need), f.status === 'fits' ? `запас ${fmtGB(f.usable - f.need)}`
+        : f.status === 'experts' ? `на видеокарте ${fmtGB(f.gpuNeed)}, в ОЗУ ${fmtGB(f.ramNeed)}`
+        : f.status === 'ssd' ? `в памяти ${fmtGB(f.gpuNeed + f.ramNeed)}, остальное читается с SSD` : `не хватает ${fmtGB(f.need - f.usable)}`) +
+      row('Генерация', f.genTps ? fmtN(f.genTps, 1) + ' ток/с' : '—', genHow) +
       row('Обработка промпта', f.prefillTps ? fmtN(f.prefillTps) + ' ток/с' : '—', f.prefillTps ? `${fmtN(goal.promptTokens)} токенов за ${promptSec < 1 ? promptSec.toFixed(1) : fmtN(promptSec)} с` : '') +
-      row('Максимальный контекст', maxCtx ? fmtCtx(Math.min(maxCtx, model.maxCtx)) + (maxCtx > model.maxCtx ? '<span class="chip">предел модели</span>' : '') : '—', 'при котором модель целиком в памяти ускорителя') +
+      row('Максимальный контекст', maxCtx ? fmtCtx(Math.min(maxCtx, model.maxCtx)) + (maxCtx > model.maxCtx ? '<span class="chip">предел модели</span>' : '') : '—', f.status === 'experts' ? 'при котором внимание и KV остаются на видеокарте' : 'при котором модель целиком в памяти ускорителя') +
       row('Время до первого слова', f.prefillTps ? (promptSec + 1 / f.genTps).toFixed(1) + ' с' : '—', 'промпт + первый токен');
 
-    renderDiag(cfg, hw, goal, f, maxCtx);
+    if (engOk) renderDiag(cfg, hw, goal, f, maxCtx);
+    else $('diag').innerHTML = `<h3>Оболочка здесь не запускается</h3><p>${esc(E.label)}: ${esc(E.note)}</p>`
+      + (best ? `<ul><li>Лучшая для этого железа — <b>${esc(C.ENGINES[best.engine].label)}</b>: ${best.fit.status === 'nofit' ? 'но и она не вмещает модель' : `около ${fmtN(best.fit.genTps, 1)} ток/с`}.</li></ul>` : '');
   }
 
-  const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
   function renderDiag(cfg, hw, goal, f, maxCtx) {
     const d = C.diagnose(cfg, hw, goal);
     const { model } = cfg;
@@ -166,7 +204,7 @@
       if (!hw.unified) tips.push(`Добавить ОЗУ: со свободными ${Math.ceil((f.need - f.usable) / 0.85 / GB)} ГБ запустится с выгрузкой${d.moe && d.expertOffloadTps ? `: у MoE эксперты в ОЗУ дадут около ${fmtN(d.expertOffloadTps, 1)} ток/с (llama.cpp: <code>--n-cpu-moe N</code>)` : ' слоёв, но у плотной модели это будет очень медленно'}.`);
       tips.push(`Или железо с памятью от ${Math.ceil(f.need / GB)} ГБ${hw.unified ? ` (для Mac от ${Math.ceil(f.need / GB / (f.need <= 36 * GB * 2 / 3 ? 2 / 3 : 3 / 4))} ГБ общей)` : ''}.`);
     } else if (d.bottleneck === 'offload') {
-      title = 'Узкое место: выгрузка в ОЗУ';
+      title = f.status === 'ssd' ? 'Узкое место: подкачка с SSD' : 'Узкое место: выгрузка в ОЗУ';
       why = `В памяти ускорителя только ${pct(f.gpuFraction)} модели, остальное читается через ОЗУ (${fmtBw(hw.sysBandwidthGBs)} против ${fmtBw(hw.bandwidthGBs)}). ` +
         (d.moe ? 'У MoE на токен читаются только активные веса, поэтому скорость терпимая.' : 'У плотной модели каждый токен читает все веса, поэтому скорость падает почти до уровня чистого процессора.');
       if (d.bestQuantFits) tips.push(`Квант ${q(d.bestQuantFits)}: влезет целиком, ${tpsAt(d.bestQuantFits)} ток/с${d.bestQuantMeetsTarget === d.bestQuantFits ? '' : ' (медленнее цели, но без выгрузки)'}.`);
@@ -181,11 +219,13 @@
       why = `Каждый токен читает ${fmtGB(f.bytesPerToken)} (${d.moe ? 'активные веса' : 'веса'} ${fmtGB(w)} + KV ${fmtGB(kv)}) при ${fmtBw(hw.bandwidthGBs)}: ${fmtN(f.genTps, 1)} ток/с. Для ${goal.genTps} ток/с нужно ${fmtBw(d.requiredBandwidthGBs)}.`;
       if (d.bestQuantMeetsTarget) tips.push(`Квант ${q(d.bestQuantMeetsTarget)}: ${tpsAt(d.bestQuantMeetsTarget)} ток/с. ${C.QUANTS[d.bestQuantMeetsTarget].note[0].toUpperCase() + C.QUANTS[d.bestQuantMeetsTarget].note.slice(1)}.`);
       else tips.push('Даже самый грубый квант не дотянет до цели: нужна модель поменьше или железо быстрее.');
-      if (d.kvShare > 0.2 && cfg.kvBits > 8) tips.push(`KV-кэш даёт ${pct(kv / f.bytesPerToken)} чтения на токен: KV в Q8_0 ускорит до ${tpsAt(Object.keys(C.QUANTS).find(k => C.QUANTS[k].bpw === cfg.bpw) || 'Q4_K_M', 8)} ток/с, короче контекст — ещё больше.`);
+      if (d.kvShare > 0.2 && cfg.kvBits > 8) tips.push(`KV-кэш даёт ${pct(kv / f.bytesPerToken)} чтения на токен: KV в Q8_0 ускорит до ${tpsAt(Object.keys(C.QUANTS).find(k => C.QUANTS[k].bpw === cfg.bpw) || 'Q4_K_M', C.KV_QUANTS.Q8_0)} ток/с, короче контекст — ещё больше.`);
       if (d.moe) tips.push('У MoE скорость зависит от активных параметров: соседняя модель с меньшим числом активных (A3B вместо A22B) будет заметно быстрее при той же памяти.');
-      tips.push('Спекулятивное декодирование (draft-модель на 0,5–1B того же семейства) даёт ×1,5–2,5 на коде и шаблонном тексте без потери качества.');
+      if (model.mtp && f.mtpGain === 1) tips.push('У модели есть MTP-голова: в оболочке, которая её использует (MTPLX на Mac, llama.cpp на видеокарте, vLLM, Strata), генерация быстрее примерно в 1,6 раза.');
+      else if (!model.mtp) tips.push('Спекулятивное декодирование (draft-модель на 0,5–1B того же семейства или EAGLE/DFlash-черновик) даёт ×1,5–2,5 на коде и шаблонном тексте без потери качества.');
       const cand = C.HARDWARE.filter(h => h.bandwidthGBs >= d.requiredBandwidthGBs && C.usableMemoryBytes(h) >= f.need).sort((a, b) => a.bandwidthGBs - b.bandwidthGBs)[0];
-      tips.push(`Железо: нужно ${fmtBw(d.requiredBandwidthGBs)} и ${Math.ceil(f.need / GB)} ГБ${cand ? `, например ${cand.name}` : ''}.`);
+      if (!isFinite(d.requiredBandwidthGBs)) tips.push(`Цель ${goal.genTps} ток/с быстрее задержки на слоях (${fmtN(C.stepLatencySec(model, hw) * 1000, 1)} мс на токен): память тут не поможет, нужна модель с меньшим числом слоёв или MTP.`);
+      else tips.push(`Железо: нужно ${fmtBw(d.requiredBandwidthGBs)} и ${Math.ceil(f.need / GB)} ГБ${cand ? `, например ${cand.name}` : ''}.`);
     } else if (d.bottleneck === 'compute') {
       title = 'Узкое место: вычисления при обработке промпта';
       why = `Генерация в норме (${fmtN(f.genTps, 1)} ток/с), но промпт в ${fmtN(goal.promptTokens)} токенов обрабатывается ${fmtN(d.promptSec)} с при ${hw.tflops} TFLOPS. Для ${goal.promptSeconds} с нужно ${fmtN(d.requiredTflops)} TFLOPS.`;
@@ -201,6 +241,12 @@
       if (upto > cfg.ctx * 1.5) tips.push(`Контекст можно поднять до ${fmtCtx(upto)}, модель останется целиком в памяти.`);
       const margins = [['память', f.usable / f.need], ['генерация', f.genTps / goal.genTps], ['обработка промпта', goal.promptSeconds / d.promptSec]].sort((a, b) => a[1] - b[1]);
       tips.push(`Ближе всего к пределу ${margins[0][0]}: запас ×${margins[0][1].toFixed(1)}. Дальше упрётесь именно туда.`);
+    }
+    // Другие оболочки, которые здесь дадут больше
+    const how = { fits: 'влезет целиком', experts: 'эксперты в ОЗУ', offload: 'часть слоёв в ОЗУ', ssd: 'подкачка с SSD' };
+    for (const r of d.betterEngines.slice(0, 2)) {
+      const e = C.ENGINES[r.engine];
+      tips.unshift(`Оболочка <b>${esc(e.label)}</b>: ${how[r.fit.status]}, около ${fmtN(r.fit.genTps, 1)} ток/с${r.fit.mtpGain > 1 ? ' с MTP' : ''}${r.fit.mem.ssd ? `, ${fmtGB(r.fit.mem.ssd)} таблиц на SSD` : ''}.`);
     }
     $('diag').innerHTML = `<h3>${title}</h3><p>${why}</p><ul>${tips.map(t => `<li>${t}</li>`).join('')}</ul>`;
   }

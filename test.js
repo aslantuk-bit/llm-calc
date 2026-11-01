@@ -85,8 +85,10 @@ test('обработка промпта ограничена вычислени�
 
 test('требуемая пропускная способность и TFLOPS под цель', () => {
   near(C.requiredBandwidthGBs(5e9, 10), 5e9 * 10 / 0.7 / 1e9, 0.01, 'ГБ/с');
-  // 4096 токенов за 10 с при 8B: 2 × 8e9 × 409.6 / 0.5 = 13.1 TFLOPS
-  near(C.requiredTflops(llama8b, 4096, 10), 2 * 8.03e9 * 409.6 / 0.5 / 1e12, 0.01, 'TFLOPS');
+  near(C.requiredBandwidthGBs(5e9, 10, 0.05), 5e9 / 0.05 / 0.7 / 1e9, 0.01, 'с задержкой 50 мс остаётся 50 мс на чтение');
+  assert.strictEqual(C.requiredBandwidthGBs(5e9, 10, 0.1), Infinity, 'цель быстрее задержки — недостижима');
+  // 4096 токенов за 10 с при 8B: (2 × 8e9 + внимание 2 × 4096 × 32 × 4096) × 409.6 / 0.5 ≈ 14.0 TFLOPS
+  near(C.requiredTflops(llama8b, 4096, 10), (2 * 8.03e9 + 2 * 4096 * 32 * 4096) * 409.6 / 0.5 / 1e12, 0.01, 'TFLOPS');
 });
 
 test('доступная память: Mac отдаёт GPU 2/3 до 36 ГБ и 3/4 выше', () => {
@@ -101,7 +103,9 @@ test('влезает целиком — скорость по памяти ус�
   const f = C.fit(cfg, hw);
   assert.strictEqual(f.status, 'fits');
   near(f.gpuFraction, 1, 1e-9, 'доля на GPU');
-  near(f.genTps, C.genTokPerSec(1000, C.bytesPerGeneratedToken(cfg)), 0.01, 'tps');
+  // время на токен = байты / (пропускная × 0,7) + слои × задержка на слой
+  near(f.genTps, 1 / (C.bytesPerGeneratedToken(cfg) / (1000e9 * 0.7) + C.stepLatencySec(llama8b, hw)), 0.01, 'tps');
+  assert.ok(f.genTps < C.genTokPerSec(1000, C.bytesPerGeneratedToken(cfg)), 'задержка на слой отнимает скорость');
 });
 
 test('не влезает в VRAM, но влезает в VRAM+ОЗУ — частичная выгрузка', () => {
@@ -112,7 +116,7 @@ test('не влезает в VRAM, но влезает в VRAM+ОЗУ — час
   assert.ok(f.gpuFraction > 0 && f.gpuFraction < 1, 'часть на GPU');
   // время на токен = доля_gpu × байт / bw_gpu + доля_cpu × байт / bw_cpu
   const bytes = C.bytesPerGeneratedToken(cfg);
-  const t = f.gpuFraction * bytes / (1000e9 * 0.7) + (1 - f.gpuFraction) * bytes / (80e9 * 0.7);
+  const t = f.gpuFraction * bytes / (1000e9 * 0.7) + (1 - f.gpuFraction) * bytes / (80e9 * 0.7) + C.stepLatencySec(llama8b, hw, true);
   near(f.genTps, 1 / t, 0.01, 'tps при выгрузке');
   const onlyGpu = C.genTokPerSec(1000, bytes), onlySys = C.genTokPerSec(80, bytes);
   assert.ok(f.genTps < onlyGpu && f.genTps > onlySys, 'между чистым GPU и чистой ОЗУ');
@@ -190,9 +194,9 @@ test('диагностика: плотная модель с выгрузкой 
 test('диагностика: влезает, но медленно — пропускная способность; подсказан квант под цель', () => {
   const l70 = { params: 70.6e9, active: 70.6e9, layers: 80, kvHeads: 8, headDim: 128, hidden: 8192 };
   const m4pro = { unified: true, memGB: 64, bandwidthGBs: 273, tflops: 9.2 };
-  const d = C.diagnose({ model: l70, bpw: 4.85, ctx: 8192, kvBits: 16 }, m4pro, { ...goal, genTps: 5.5 });
+  const d = C.diagnose({ model: l70, bpw: 4.85, ctx: 8192, kvBits: 16 }, m4pro, { ...goal, genTps: 5 });
   assert.strictEqual(d.bottleneck, 'bandwidth');
-  // Q4_K_M даёт ~4.2 ток/с, Q3_K_M ~5.1, Q2_K ~5.9 → под цель 5.5 подходит Q2_K
+  // с задержкой 80 слоёв × 0,19 мс: Q4_K_M ~4,0 ток/с, Q3_K_M ~4,8, Q2_K ~5,4 → под цель 5 подходит Q2_K
   assert.strictEqual(d.bestQuantMeetsTarget, 'Q2_K');
 });
 
@@ -259,6 +263,126 @@ test('пресеты моделей и железа заполнены', () => {
   assert.strictEqual(new Set(hnames).size, hnames.length, 'имена железа повторяются');
   for (const g of ['Apple · текущие Mac', 'Коробки NVIDIA GB10', 'Коробки AMD Strix Halo', 'NVIDIA Jetson']) assert.ok(C.HARDWARE.some(h => h.group === g), `нет группы ${g}`);
   assert.ok(C.QUANTS.Q4_K_M.bpw > 4 && C.QUANTS.Q4_K_M.bpw < 5.5, 'Q4_K_M ≈ 4.85 бит');
+});
+
+test('обновление 01.11.2026: новые модели и поправки железа', () => {
+  const M = n => C.MODELS.find(m => m.name.startsWith(n));
+  const H = n => C.HARDWARE.find(h => h.name === n);
+  for (const n of ['Mistral Large 4', 'MiniMax-M3.1-Flash', 'Ling-3.0-flash', 'LFM3 1.7B', 'Nemotron-Labs Dory 4B']) assert.ok(M(n), `нет модели ${n}`);
+  assert.strictEqual(M('Mistral Large 4').kvFactor, 1, 'Mistral Large 4 — MLA');
+  assert.strictEqual(M('Ling-3.0-flash').kvLayers, 7, 'Ling 3.0: MLA только в каждом шестом слое');
+  // LFM3: KV держат 11 слоёв из 24, из них 5 — окно 256
+  const lfm = M('LFM3 1.7B');
+  assert.ok(lfm.kvLayers === 11 && lfm.window === 256, 'LFM3: 6 полных + 5 оконных слоёв');
+  assert.strictEqual(H('Qualcomm Snapdragon X2 Elite').bandwidthGBs, 152, 'X2 Elite: 128 бит × 9523 МТ/с');
+  assert.ok(H('NVIDIA DGX Spark').memOptions.includes(64), 'DGX Spark 64 ГБ с 23.10.2026');
+  assert.ok(H('Arc Pro B70 32 ГБ'), 'нет Arc Pro B70');
+  assert.ok(H('Framework Desktop (AI Max+ PRO 495, 192 ГБ)')?.bandwidthGBs === 273, 'нет Gorgon Halo 192 ГБ');
+});
+
+// --- Оболочки (движки вывода) и режимы размещения, 01.11.2026
+const moe120 = { params: 120e9, active: 6e9, layers: 48, kvHeads: 2, headDim: 256, hidden: 2560, kvLayers: 12 };
+const rtx5070 = { unified: false, vendor: 'nvidia', memGB: 12, bandwidthGBs: 672, tflops: 123, sysMemGB: 64, sysBandwidthGBs: 90 };
+const mac128 = { unified: true, vendor: 'apple', memGB: 128, bandwidthGBs: 614, tflops: 40 };
+
+test('оболочки: у каждой подпись, платформы и режимы', () => {
+  for (const k of ['llama.cpp', 'mlx', 'vllm', 'ktrans', 'strata', 'stream']) {
+    const e = C.ENGINES[k];
+    assert.ok(e && e.label && e.note && Array.isArray(e.modes) && Array.isArray(e.kv), `нет оболочки ${k}`);
+  }
+});
+
+test('оболочки: совместимость с железом и моделью', () => {
+  assert.ok(C.engineOk('mlx', moe120, mac128));
+  assert.ok(!C.engineOk('mlx', moe120, rtx5070), 'MLX только на Mac');
+  assert.ok(!C.engineOk('vllm', moe120, mac128), 'vLLM не для Mac');
+  assert.ok(!C.engineOk('strata', moe120, rtx5070), 'Strata — только свои модели');
+  assert.ok(C.engineOk('strata', { ...moe120, strata: true }, rtx5070));
+  assert.ok(!C.engineOk('strata', { ...moe120, strata: true }, { ...rtx5070, memGB: 8 }), 'Strata: видеокарта от 12 ГБ');
+  assert.ok(!C.engineOk('stream', llama8b, rtx5070), 'подкачка с SSD — только MoE');
+});
+
+test('доля памяти под GPU у единой памяти: своя у коробок (gpuShare)', () => {
+  near(C.usableMemoryBytes({ unified: true, memGB: 128, gpuShare: 0.9 }), 128 * GB * 0.9, 1, 'GB10');
+});
+
+test('vLLM резервирует 10 % видеопамяти', () => {
+  near(C.fit({ model: llama8b, bpw: 4.85, ctx: 4096, kvBits: 16, engine: 'vllm' }, rtx5070).usable, 12 * GB * 0.9, 1, 'usable');
+});
+
+test('эксперты в ОЗУ: внимание и общие веса на GPU, эксперты читаются через ОЗУ', () => {
+  const cfg = { model: moe120, bpw: 3.35, ctx: 8192, kvBits: 16, engine: 'ktrans' };
+  const f = C.fit(cfg, rtx5070);
+  assert.strictEqual(f.status, 'experts');
+  assert.ok(f.gpuNeed <= f.usable && f.ramNeed <= 64 * GB * 0.85, 'GPU и ОЗУ вмещают свои части');
+  // на GPU остаётся место — часть экспертов кэшируется там, скорость не ниже «все эксперты через ОЗУ»
+  const g = C.NON_EXPERT_SHARE, act = moe120.active * 3.35 / 8;
+  const kv = C.kvBytesPerToken(moe120, 16, 8192) * 8192;
+  const worst = 1 / (act * (1 - g) / (90e9 * C.BW_EFF) + (act * g + kv) / (672e9 * C.BW_EFF) + C.stepLatencySec(moe120, rtx5070, true, 'ktrans'));
+  assert.ok(f.genTps >= worst * 0.999, `${f.genTps} < ${worst}`);
+  assert.ok(f.genTps < C.genTokPerSec(672, C.bytesPerGeneratedToken(cfg)), 'медленнее, чем целиком на GPU');
+});
+
+test('задержка на слой: Mac 0,19 мс, видеокарты 0,09, при выгрузке плюс синхронизация оболочки', () => {
+  near(C.stepLatencySec(llama8b, mac128), 32 * 0.19e-3, 1e-9, 'Mac');
+  near(C.stepLatencySec(llama8b, rtx5070), 32 * 0.09e-3, 1e-9, 'NVIDIA');
+  assert.ok(C.stepLatencySec(llama8b, rtx5070, true, 'strata') < C.stepLatencySec(llama8b, rtx5070, true, 'llama.cpp'), 'Strata синхронизируется быстрее');
+});
+
+test('llama.cpp у MoE выбирает экспертов в ОЗУ, если это быстрее слоёв', () => {
+  const f = C.fit({ model: moe120, bpw: 3.35, ctx: 8192, kvBits: 16, engine: 'llama.cpp' }, rtx5070);
+  assert.strictEqual(f.status, 'experts');
+  const dense = C.fit({ model: { ...llama8b, params: 30e9, active: 30e9 }, bpw: 4.85, ctx: 4096, kvBits: 16, engine: 'llama.cpp' }, rtx5070);
+  assert.strictEqual(dense.status, 'offload', 'плотная модель — по слоям');
+});
+
+test('n-gram/Engram-таблицы уходят на SSD только в оболочках, которые это умеют', () => {
+  const ng = { ...moe120, params: 171e9, ssdParams: 51e9, mtp: true, strata: true };
+  const viaLlama = C.memoryNeeded({ model: ng, bpw: 4.5, ctx: 8192, kvBits: 16, engine: 'llama.cpp' });
+  const viaMlx = C.memoryNeeded({ model: ng, bpw: 4.5, ctx: 8192, kvBits: 16, engine: 'mlx' });
+  near(viaLlama.weights - viaMlx.weights, 51e9 * 4.5 / 8, 1, 'разница — таблица');
+  near(viaMlx.ssd, 51e9 * 4.5 / 8, 1, 'таблица на диске');
+});
+
+test('MTP ускоряет генерацию там, где оболочка его поддерживает', () => {
+  const m = { ...moe120, params: 30e9, mtp: true };
+  const base = C.fit({ model: { ...m, mtp: false }, bpw: 4.85, ctx: 4096, kvBits: 16, engine: 'mlx' }, mac128).genTps;
+  near(C.fit({ model: m, bpw: 4.85, ctx: 4096, kvBits: 16, engine: 'mlx' }, mac128).genTps, base * C.MTP_GAIN, 0.01, 'MLX/MTPLX');
+  // llama.cpp на Metal: MTP пока в минусе — без ускорения
+  near(C.fit({ model: m, bpw: 4.85, ctx: 4096, kvBits: 16, engine: 'llama.cpp' }, mac128).genTps, base, 0.01, 'llama.cpp на Mac');
+});
+
+test('подкачка экспертов с SSD: запускается, когда не влезает даже в ОЗУ, и упирается в диск', () => {
+  const huge = { ...moe120, params: 400e9, active: 17e9 };
+  const mac48 = { unified: true, vendor: 'apple', memGB: 48, bandwidthGBs: 400, tflops: 14, ssdGBs: 12 };
+  assert.strictEqual(C.fit({ model: huge, bpw: 4.5, ctx: 4096, kvBits: 16, engine: 'mlx' }, mac48).status, 'nofit');
+  const f = C.fit({ model: huge, bpw: 4.5, ctx: 4096, kvBits: 16, engine: 'stream' }, mac48);
+  assert.strictEqual(f.status, 'ssd');
+  assert.ok(f.genTps > 0.5 && f.genTps < 10, `ожидаются единицы ток/с, а не ${f.genTps}`);
+});
+
+test('лучшая оболочка: Flash-Next-подобная модель на 12 ГБ + 64 ГБ — Strata', () => {
+  const ng = { ...moe120, params: 171e9, ssdParams: 51e9, mtp: true, strata: true };
+  const best = C.bestEngine({ model: ng, bpw: 3, ctx: 8192, kvBits: 16 }, rtx5070);
+  assert.strictEqual(best.engine, 'strata');
+  assert.strictEqual(best.fit.status, 'experts');
+  assert.strictEqual(C.bestEngine({ model: { ...moe120, params: 30e9, mtp: true }, bpw: 4.85, ctx: 4096, kvBits: 16 }, mac128).engine, 'mlx');
+});
+
+test('обработка промпта: внимание дорожает с длиной промпта', () => {
+  const short = C.prefillTokPerSec(165, llama8b), long = C.prefillTokPerSec(165, llama8b, 32768);
+  near(C.prefillTokPerSec(165, llama8b, 0), short, 1e-6, 'без длины — как раньше');
+  // 8B: 2·8e9 = 16 GFLOP на токен + 2·4096·32·32768 ≈ 8.6 GFLOP на внимание
+  near(short / long, 1 + 2 * 4096 * 32 * 32768 / (2 * 8.03e9), 0.01, 'доля внимания');
+});
+
+test('кванты и KV: реальные биты и формат', () => {
+  near(C.QUANTS.MLX4.bpw, 4.5, 1e-9, 'MLX 4-bit g64');
+  assert.strictEqual(C.QUANTS.MLX4.fmt, 'mlx');
+  near(C.QUANTS.NVFP4.bpw, 4.5, 1e-9, 'NVFP4');
+  near(C.QUANTS.IQ4_XS.bpw, 4.25, 1e-9, 'IQ4_XS');
+  near(C.KV_QUANTS.Q8_0, 8.5, 1e-9, 'q8_0 KV 8.5 бит');
+  near(C.KV_QUANTS.Q4_0, 4.5, 1e-9, 'q4_0 KV 4.5 бит');
 });
 
 let failed = 0;

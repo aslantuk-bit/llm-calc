@@ -7,19 +7,29 @@ var LLMCalc = (() => {
   const OS_RESERVE_SYS = 0.85;      // сколько системной ОЗУ можно занять под выгрузку
 
   // Реальные биты на вес у GGUF-квантов (с учётом масштабов и смешанных типов слоёв)
+  // fmt — в каких оболочках квант родной: gguf (llama.cpp и производные), mlx (Mac), fp4 (vLLM, Strata на NVIDIA), gptq (vLLM), any — везде
   const QUANTS = {
-    FP16:    { bpw: 16,   label: 'FP16 / BF16', note: 'без потерь, вдвое больше Q8' },
-    Q8_0:    { bpw: 8.5,  label: 'Q8_0',        note: 'почти без потерь' },
-    Q6_K:    { bpw: 6.56, label: 'Q6_K',        note: 'потери незаметны' },
-    Q5_K_M:  { bpw: 5.69, label: 'Q5_K_M',      note: 'лёгкие потери' },
-    Q4_K_M:  { bpw: 4.85, label: 'Q4_K_M',      note: 'стандарт: баланс размера и качества' },
-    MXFP4:   { bpw: 4.25, label: 'MXFP4',       note: 'родной формат GPT-OSS' },
-    Q4_0:    { bpw: 4.55, label: 'Q4_0',        note: 'быстрый на Apple, чуть хуже K_M' },
-    Q3_K_M:  { bpw: 3.91, label: 'Q3_K_M',      note: 'заметные потери' },
-    Q2_K:    { bpw: 3.35, label: 'Q2_K',        note: 'сильные потери' },
-    IQ2_XXS: { bpw: 2.06, label: 'IQ2_XXS',     note: 'крайний случай, качество падает' },
+    FP16:    { bpw: 16,   fmt: 'any',  label: 'FP16 / BF16', note: 'без потерь, вдвое больше Q8' },
+    Q8_0:    { bpw: 8.5,  fmt: 'gguf', label: 'Q8_0',        note: 'почти без потерь' },
+    MLX8:    { bpw: 8.5,  fmt: 'mlx',  label: 'MLX 8-bit',   note: 'почти без потерь; формат MLX (группы по 64)' },
+    Q6_K:    { bpw: 6.56, fmt: 'gguf', label: 'Q6_K',        note: 'потери незаметны' },
+    Q5_K_M:  { bpw: 5.69, fmt: 'gguf', label: 'Q5_K_M',      note: 'лёгкие потери' },
+    Q4_K_M:  { bpw: 4.85, fmt: 'gguf', label: 'Q4_K_M',      note: 'стандарт: баланс размера и качества' },
+    UD_Q4:   { bpw: 4.6,  fmt: 'gguf', label: 'UD-Q4_K_XL',  note: 'динамический квант Unsloth: качество Q4_K_M, файл чуть меньше' },
+    MLX4:    { bpw: 4.5,  fmt: 'mlx',  label: 'MLX 4-bit',   note: 'стандарт для Mac (группы по 64: 4 бита + масштаб и сдвиг)' },
+    NVFP4:   { bpw: 4.5,  fmt: 'fp4',  label: 'NVFP4',       note: 'аппаратный FP4 у Blackwell (RTX 50, RTX PRO, GB10)' },
+    Q4_0:    { bpw: 4.55, fmt: 'gguf', label: 'Q4_0',        note: 'быстрый на Apple, чуть хуже K_M' },
+    MXFP4:   { bpw: 4.25, fmt: 'any',  label: 'MXFP4',       note: 'родной формат GPT-OSS' },
+    GPTQ4:   { bpw: 4.25, fmt: 'gptq', label: 'AWQ / GPTQ int4', note: 'для vLLM и SGLang' },
+    IQ4_XS:  { bpw: 4.25, fmt: 'gguf', label: 'IQ4_XS',      note: 'почти как Q4_K_M, на 12 % меньше' },
+    Q3_K_M:  { bpw: 3.91, fmt: 'gguf', label: 'Q3_K_M',      note: 'заметные потери' },
+    Q2_K:    { bpw: 3.35, fmt: 'gguf', label: 'Q2_K',        note: 'сильные потери' },
+    IQ3_XXS: { bpw: 3.06, fmt: 'gguf', label: 'IQ3_XXS',     note: 'для больших MoE, у которых иначе не влезает' },
+    IQ2_XXS: { bpw: 2.06, fmt: 'gguf', label: 'IQ2_XXS',     note: 'крайний случай, качество падает' },
   };
-  const KV_QUANTS = { FP16: 16, Q8_0: 8, Q4_0: 4 };
+  // KV-кэш: q8_0 и q4_0 в llama.cpp хранят масштаб на блок из 32 — реально 8,5 и 4,5 бита; fp8 и NVFP4 в vLLM — столько же
+  const KV_QUANTS = { FP16: 16, Q8_0: 8.5, Q4_0: 4.5, TQ3: 3.25 };
+  const KV_LABELS = { FP16: 'FP16', Q8_0: 'Q8_0 / FP8', Q4_0: 'Q4_0 / NVFP4', TQ3: 'TurboQuant 3 бит (vLLM)' };
 
   // Модели: params/active в штуках параметров; kvFactor 1 — MLA (один латентный вектор вместо пары K/V);
   // window/localRatio — скользящее окно: доля слоёв с локальным вниманием и его размер;
@@ -74,10 +84,9 @@ var LLMCalc = (() => {
   m('Qwen 3.5–3.8', 'Qwen3.5 397B-A17B (MoE)',      397,  17,   60, 2, 256, 4096, 262144, { kvLayers: 15 });
   m('Qwen 3.5–3.8', 'Qwen3.8 27B',                  27,   27,   64, 4, 256, 5120, 262144, { kvLayers: 16 });
   m('Qwen 3.5–3.8', 'Qwen3.8-Max 2.4T-A95B (MoE)',      2400, 95,   92, 4, 256, 8192, 262144, { kvLayers: 23 });
-  // Flash-Next: 125B трансформер + 51B n-gram-таблиц + 4B MTP-голова. В GGUF грузится ~176B (без MTP);
-  // в MLX n-gram-таблицы можно выгрузить на SSD, тогда в памяти ~125B.
-  m('Qwen 3.5–3.8', 'Qwen3.8-Flash-Next 176B-A6B (MoE, GGUF)', 176, 6, 48, 2, 256, 2560, 262144, { kvLayers: 12, note: 'из них 51B — n-gram-таблицы' });
-  m('Qwen 3.5–3.8', 'Qwen3.8-Flash-Next 125B-A6B (MoE, MLX, n-gram на SSD)', 125, 6, 48, 2, 256, 2560, 262144, { kvLayers: 12, note: 'n-gram-таблицы выгружены на SSD' });
+  // Flash-Next: 125B трансформер + 51B n-gram-таблиц + 4B MTP-голова. llama.cpp грузит все ~176B;
+  // MLX/MTPLX и Strata держат n-gram-таблицы на SSD (ssdParams), тогда в памяти ~125B.
+  m('Qwen 3.5–3.8', 'Qwen3.8-Flash-Next 176B-A6B (MoE, n-gram 51B)', 176, 6, 48, 2, 256, 2560, 262144, { kvLayers: 12, ssdParams: 51 * B, note: 'из них 51B — n-gram-таблицы' });
   // --- Google Gemma
   m('Gemma', 'Gemma 2 2B',                2.6,  2.6,  26, 4,  256, 2304,  8192,  SW(4096, 1/2));
   m('Gemma', 'Gemma 2 9B',                9.2,  9.2,  42, 8,  256, 3584,  8192,  SW(4096, 1/2));
@@ -108,6 +117,7 @@ var LLMCalc = (() => {
   m('Mistral', 'Mixtral 8x22B (MoE)',     141,  39,   56, 8,  128, 6144,  65536);
   m('Mistral', 'Mistral Large 2 123B',    123,  123,  88, 8,  128, 12288, 131072);
   m('Mistral', 'Mistral Large 3 675B-A41B (MoE)', 675, 41, 60, 8, 128, 7168, 262144, { note: 'слои и KV-головы оценены, конфиг закрыт' });
+  m('Mistral', 'Mistral Large 4 1T-A52B (MoE, MLA)', 1050, 52, 72, 1, 576, 6144, 1048576, { ...MLA, note: 'индексатор читает часть кэша, хранится весь' });
   // --- DeepSeek
   m('DeepSeek', 'DeepSeek-V2-Lite 16B-A2.4B (MoE, MLA)', 15.7, 2.4, 27, 1, 576, 2048, 32768, MLA);
   m('DeepSeek', 'DeepSeek-V2 / Coder-V2 236B-A21B (MoE, MLA)', 236, 21, 60, 1, 576, 5120, 131072, MLA);
@@ -115,7 +125,7 @@ var LLMCalc = (() => {
   // V4 (2026): сжатое разрежённое внимание, по карточке модели KV ≈ 10 % от V3.2
   m('DeepSeek', 'DeepSeek V4 Flash 284B-A13B (MoE)', 284, 13, 43, 1, 576, 4096, 1048576, { ...MLA, kvScale: 0.1, note: 'KV ≈ 10 % от V3 по карточке' });
   m('DeepSeek', 'DeepSeek V4 Pro 1.6T-A49B (MoE)',   1600, 49, 61, 1, 576, 7168, 1048576, { ...MLA, kvScale: 0.1, note: 'KV ≈ 10 % от V3 по карточке' });
-  m('DeepSeek', 'DeepSeek V4.1 Flash 763B-A16B (MoE, Engram)', 763, 16, 40, 1, 576, 5120, 1048576, { ...MLA, kvScale: 0.0125, note: 'из них 196B — Engram-память; KV ≈ 1/8 от V4 Flash по карточке' });
+  m('DeepSeek', 'DeepSeek V4.1 Flash 763B-A16B (MoE, Engram)', 763, 16, 40, 1, 576, 5120, 1048576, { ...MLA, kvScale: 0.0125, ssdParams: 196 * B, note: 'из них 196B — Engram-память; KV ≈ 1/8 от V4 Flash по карточке' });
   // --- OpenAI
   m('OpenAI', 'GPT-OSS 20B (MoE)',        21,   3.6,  24, 8,  64,  2880,  131072, SW(128, 1/2));
   m('OpenAI', 'GPT-OSS 120B (MoE)',       117,  5.1,  36, 8,  64,  2880,  131072, SW(128, 1/2));
@@ -140,6 +150,7 @@ var LLMCalc = (() => {
   m('Китайские MoE', 'MiniMax-M2 230B-A10B (MoE)', 230, 10, 62, 8, 128, 3072, 196608);
   m('Китайские MoE', 'MiniMax-M2.5 / M2.7 229B-A10B (MoE)', 229, 10, 62, 8, 128, 3072, 204800);
   m('Китайские MoE', 'MiniMax-M3 428B-A23B (MoE)', 428, 23, 60, 4, 128, 6144, 1048576, { note: 'разрежённое внимание, кэш хранится целиком' });
+  m('Китайские MoE', 'MiniMax-M3.1-Flash 428B-A23B (MoE)', 428, 23, 60, 4, 128, 6144, 1048576, { note: 'блочно-разрежённое внимание, кэш хранится целиком' });
   m('Китайские MoE', 'MiMo-V2-Flash 309B-A15B (MoE)', 309, 15, 48, 4, 192, 4096, 262144, SW(128, 39/48));
   m('Китайские MoE', 'MiMo-V2.5 310B-A15B (MoE)', 310, 15, 48, 4, 192, 4096, 1048576, SW(128, 39/48));
   m('Китайские MoE', 'MiMo-V2.5-Pro 1T-A42B (MoE)', 1020, 42, 70, 8, 192, 6144, 1048576, SW(128, 6/7));
@@ -159,6 +170,8 @@ var LLMCalc = (() => {
   m('NVIDIA', 'Nemotron 3.5 Lightning 30B-A3B', 31.6, 3, 52, 2, 128, 2688, 262144, { kvLayers: 6 });
   m('NVIDIA', 'Nemotron 3.5 Bolt 74B-A9B',  74.9, 9,  88, 2,  128, 4096,  262144, { kvLayers: 8 });
   m('NVIDIA', 'Nemotron 3.5 Super VL 120B-A12B', 124.5, 12, 88, 2, 128, 4096, 1048576, { kvLayers: 8 });
+  // Dory: 36 блоков внимания, середина (20 из них) проходится дважды со своим кэшем на каждый проход → 56 слоёв KV
+  m('NVIDIA', 'Nemotron-Labs Dory 4B (петля)', 4, 4, 56, 4, 256, 2560, 262144, { ...SW(1024, 3/4), note: 'середина модели идёт дважды: генерация медленнее оценки примерно на треть' });
   // --- Poolside
   m('Poolside', 'Laguna XS 2.1 33B-A3B (MoE)', 33, 3, 40, 8, 128, 2048, 262144, SW(512, 3/4));
   m('Poolside', 'Laguna S 2.1 118B-A8B (MoE)', 118, 8, 48, 8, 128, 3072, 1048576, SW(512, 3/4));
@@ -166,6 +179,7 @@ var LLMCalc = (() => {
   m('Прочие MoE', 'Meta Muse Spark Open 816B-A42B (MoE)', 822, 42, 62, 16, 64, 8192, 1048576, SW(2048, 46/62));
   m('Прочие MoE', 'Reflection Beam 1.0 501B-A23B (MoE)', 501, 23, 52, 8, 128, 5120, 1048576, SW(512, 43/52));
   m('Прочие MoE', 'Marin Snowball 67B-A2B v0 (MoE)', 67, 2, 26, 5, 128, 2560, 262144, SW(2048, 3/4));
+  m('Прочие MoE', 'Ling-3.0-flash-VL 124B-A5.5B (MoE, гибрид, MLA)', 124, 5.5, 42, 1, 576, 2560, 131072, { ...MLA, kvLayers: 7 });
   // --- Cohere
   m('Cohere', 'Command R 35B',            35,   35,   40, 8,  128, 8192,  131072);
   m('Cohere', 'Command R+ 104B',          104,  104,  64, 8,  128, 12288, 131072);
@@ -173,6 +187,7 @@ var LLMCalc = (() => {
   // --- Прочие открытые
   m('Прочие', 'TinyLlama 1.1B',           1.1,  1.1,  22, 4,  64,  2048,  2048);
   m('Прочие', 'SmolLM3 3B',               3.1,  3.1,  36, 4,  128, 2048,  65536);
+  m('Прочие', 'LFM3 1.7B (гибрид со свёртками)', 1.7, 1.7, 24, 4, 128, 2048, 262144, { kvLayers: 11, ...SW(256, 5/11) });
   m('Прочие', 'Granite 3.x 8B',           8.2,  8.2,  40, 8,  128, 4096,  131072);
   m('Прочие', 'Granite 4.0 H Small 32B-A9B (MoE, гибрид)', 32, 9, 40, 8, 128, 4096, 131072, { kvLayers: 10 });
   m('Прочие', 'OLMo 2 7B',                7.3,  7.3,  32, 32, 128, 4096,  4096);
@@ -187,13 +202,31 @@ var LLMCalc = (() => {
   m('Прочие', 'EXAONE 4.0 32B',           32,   32,   64, 8,  128, 5120,  131072, SW(4096, 3/4));
   m('Прочие', 'Falcon3 10B',              10.3, 10.3, 40, 4,  256, 3072,  32768);
 
+  // MTP-голова в config.json (num_nextn_predict_layers, mtp_num_hidden_layers, num_mtp_modules) — проверено 01.11.2026
+  const MTP_PREFIXES = ['Qwen3.5 ', 'Qwen3.8 27B', 'Qwen3.8-Flash-Next', 'DeepSeek V3', 'DeepSeek V4', 'GLM-4.5', 'GLM-5',
+    'MiniMax-M2', 'MiniMax-M3 ', 'MiMo-V2.6-Flash', 'Step 3.5', 'Step 5', 'Nemotron 3 Super', 'Nemotron 3 Ultra',
+    'Nemotron 3.5 Lightning', 'Nemotron 3.5 Super VL'];
+  // Модели, под которые написан Strata (README, docs/MODELS.md, 31.10.2026)
+  const STRATA_PREFIXES = ['Qwen3.8-Flash-Next', 'Qwen3.5 27B / Qwen3.6', 'Qwen3.5 35B-A3B / Qwen3.6', 'DeepSeek V4.1 Flash'];
+  for (const md of MODELS) {
+    if (MTP_PREFIXES.some(p => md.name.startsWith(p))) md.mtp = true;
+    if (STRATA_PREFIXES.some(p => md.name.startsWith(p))) md.strata = true;
+  }
+
   // Железо. memGB — память ускорителя (или вся ОЗУ при unified). tflops — практичные FP16 без разрежённости
   // (у NVIDIA это половина маркетинговых tensor-цифр, у Apple M1–M4 — пиковые FP32; у M5/M6 с нейроускорителями в GPU
   // взято ×2 к M4-аналогу, консервативно к заявленным ×3–4). Для дискретных карт sysMemGB/sysBandwidthGBs — ОЗУ под выгрузку.
   // Коробки и Mac проверены по спецификациям производителей 13.09.2026.
   const HARDWARE = [];
-  const add = (group, name, memGB, bandwidthGBs, tflops, opts = {}) =>
-    HARDWARE.push({ group, name, memGB, bandwidthGBs, tflops, unified: false, sysMemGB: 32, sysBandwidthGBs: 80, sysTflops: 1, ...opts });
+  // vendor — по группе: от него зависит, какие оболочки запускаются; ssdGBs — чтение с SSD при подкачке экспертов
+  const vendorOf = (group, name) => /Apple/.test(group) ? 'apple' : /GB10|Jetson|^NVIDIA/.test(group) ? 'nvidia'
+    : /Strix|^AMD/.test(group) ? 'amd' : /^Intel/.test(group) ? 'intel' : /процессор/.test(group) ? 'cpu'
+    : /Intel/.test(name) ? 'intel' : /AMD/.test(name) ? 'amd' : 'qualcomm';
+  const add = (group, name, memGB, bandwidthGBs, tflops, opts = {}) => {
+    const vendor = vendorOf(group, name);
+    HARDWARE.push({ group, name, memGB, bandwidthGBs, tflops, unified: false, sysMemGB: 32, sysBandwidthGBs: 80, sysTflops: 1,
+      vendor, ssdGBs: vendor === 'apple' ? 12 : 6, ...opts });
+  };
   const uni = (group, name, bw, tf, mems, def) => add(group, name, def ?? mems[Math.floor(mems.length / 2)], bw, tf, { unified: true, memOptions: mems });
 
   // --- Apple: что продаётся сейчас (сентябрь 2026)
@@ -233,18 +266,22 @@ var LLMCalc = (() => {
   uni(G_OLD, 'M4 Max 40-core GPU', 546, 18,   [48, 64, 128]);
   uni(G_OLD, 'M5 (первые MacBook Pro 14", 2025)', 153, 10, [16, 24, 32]);
 
-  // --- Коробки на NVIDIA GB10: одна платформа, 128 ГБ LPDDR5X 273 ГБ/с, 1 PFLOP FP4 (≈60 TFLOPS FP16 практичных)
+  // --- Коробки на NVIDIA GB10: одна платформа, 64 (с 23.10.2026) или 128 ГБ LPDDR5X 273 ГБ/с, 1 PFLOP FP4 (≈60 TFLOPS FP16 практичных)
   const G_GB10 = 'Коробки NVIDIA GB10';
   for (const n of ['NVIDIA DGX Spark', 'ASUS Ascent GX10', 'Dell Pro Max with GB10', 'HP ZGX Nano AI Station G1n', 'Lenovo ThinkStation PGX',
                    'MSI EdgeXpert MS-C931', 'Acer Veriton GN100', 'Gigabyte AI TOP Atom'])
-    uni(G_GB10, n, 273, 60, [128]);
+    uni(G_GB10, n, 273, 60, [64, 128], 128);
   uni(G_GB10, '2× DGX Spark в связке (ConnectX-7)', 273, 60, [256], 256);
+  // DGX OS (Linux): CUDA видит почти всю общую память, системе остаётся ~10 %
+  for (const h of HARDWARE) if (h.group === G_GB10) h.gpuShare = 0.9;
 
   // --- Коробки на AMD Strix Halo (Ryzen AI Max+ 395: 40 CU, 256 ГБ/с; GPU отдают до 96 из 128 ГБ)
   const G_SH = 'Коробки AMD Strix Halo';
   const sh = (n, mems, tf = 15, bw = 256) => uni(G_SH, n, bw, tf, mems, mems[mems.length - 1]);
   sh('Framework Desktop (AI Max+ 395)', [64, 128]);
   sh('Framework Desktop (AI Max 385, 32 CU)', [32], 12);
+  sh('Framework Desktop (AI Max+ PRO 495, 192 ГБ)', [192], 15, 273);   // Gorgon Halo: LPDDR5X-8533, GPU до 160 ГБ
+  HARDWARE[HARDWARE.length - 1].gpuShare = 160 / 192;
   sh('GMKtec EVO-X2', [64, 96, 128]);
   sh('Beelink GTR9 Pro', [64, 128]);
   sh('Minisforum MS-S1 MAX', [128]);
@@ -264,6 +301,7 @@ var LLMCalc = (() => {
   uni(G_JET, 'Jetson AGX Orin 32 ГБ',       205, 35,  [32]);
   uni(G_JET, 'Jetson AGX Orin 64 ГБ',       205, 35,  [64]);
   uni(G_JET, 'Jetson AGX Thor 128 ГБ',      273, 130, [128]);
+  for (const h of HARDWARE) if (h.group === G_JET) h.gpuShare = 0.9;   // JetPack (Linux), как у GB10
 
   // --- Мини-ПК и ноутбуки на других чипах (GPU встроенный, память общая)
   const G_MINI = 'Мини-ПК на других чипах';
@@ -271,7 +309,7 @@ var LLMCalc = (() => {
   uni(G_MINI, 'Intel Core Ultra 9 285H Arrow Lake (ASUS NUC 15 Pro и др.)',  102, 8,  [32, 64, 96]);
   uni(G_MINI, 'AMD Ryzen AI 9 HX 370 (Beelink SER9, GEEKOM A9 Max, EVO-X1)',   90, 6,  [32, 64, 96]);
   uni(G_MINI, 'Qualcomm Snapdragon X2 Elite Extreme',                          228, 6,  [48, 64, 128]);
-  uni(G_MINI, 'Qualcomm Snapdragon X2 Elite',                                  192, 5,  [32, 48, 64]);
+  uni(G_MINI, 'Qualcomm Snapdragon X2 Elite',                                  152, 5,  [32, 48, 64, 128]);
   uni(G_MINI, 'Qualcomm Snapdragon X Elite',                                   135, 4.6, [16, 32, 64]);
 
   // --- Дискретные карты NVIDIA
@@ -299,12 +337,60 @@ var LLMCalc = (() => {
   add('AMD', 'RX 9070 XT 16 ГБ',        16, 640,  97);
   add('AMD', 'Radeon AI PRO R9700 32 ГБ', 32, 640, 96);
   add('Intel', 'Arc B580 12 ГБ',        12, 456,  58);
+  add('Intel', 'Arc Pro B70 32 ГБ',     32, 608,  91);
   const cpu = (name, mem, bw, tf, mems) => add('Только процессор', name, mem, bw, tf, { unified: true, cpuOnly: true, memOptions: mems });
   cpu('Ноутбук, DDR4-3200 двухканал',      16,  51,  0.8, [8, 16, 32, 64]);
   cpu('ПК, DDR5-5600 двухканал',           32,  90,  1.5, [16, 32, 64, 96, 128, 192]);
   cpu('ПК, DDR5-6400 двухканал',           32,  102, 1.5, [16, 32, 64, 96, 128, 192]);
   cpu('Рабочая станция, DDR5 8-канал',     256, 300, 4,   [128, 256, 512, 1024]);
   cpu('Сервер, DDR5 12-канал (EPYC)',      512, 460, 6,   [256, 512, 1024, 2048]);
+
+  // Оболочки (движки вывода). modes — куда можно положить то, что не влезло в память ускорителя:
+  // layers — слои в ОЗУ; experts — эксперты MoE в ОЗУ, внимание/общие веса/KV на GPU; ssd — эксперты подкачиваются с SSD.
+  // ssd: true — n-gram/Engram-таблицы (ssdParams) читаются с диска и не занимают память. kv — какие кэши поддерживает.
+  // Источники: README и документация движков, проверено 01.11.2026.
+  const ALL = ['apple', 'nvidia', 'amd', 'intel', 'qualcomm', 'cpu'];
+  const ENGINES = {
+    'llama.cpp': { label: 'llama.cpp (и Ollama, LM Studio)', vendors: ALL, modes: ['layers', 'experts'], kv: ['FP16', 'Q8_0', 'Q4_0'],
+      fmts: ['gguf', 'any'], mtp: hw => hw.vendor !== 'apple' && !hw.cpuOnly, syncMs: 0.3,
+      note: 'Универсальная, любая платформа. Не влезло — слои (-ngl) или эксперты MoE (--n-cpu-moe) уходят в ОЗУ. MTP-головы (--spec-type draft-mtp) с мая 2026; на Mac пока без выигрыша. Ollama и LM Studio работают на ней же.' },
+    mlx: { label: 'MLX / MTPLX (только Mac)', vendors: ['apple'], modes: [], ssd: true, kv: ['FP16', 'Q8_0', 'Q4_0'],
+      fmts: ['mlx', 'any'], mtp: () => true,
+      note: 'Только Mac. MTPLX использует MTP-голову модели: генерация ×1,6–2,7. N-gram-таблицы Qwen3.8-Flash-Next читаются с SSD, в памяти их нет.' },
+    vllm: { label: 'vLLM / SGLang', vendors: ['nvidia', 'amd', 'intel'], modes: [], usable: 0.9, kv: ['FP16', 'Q8_0', 'Q4_0', 'TQ3'],
+      fmts: ['any', 'fp4', 'gptq'], mtp: () => true,
+      note: 'Серверная: всё в видеопамяти (занимает 90 %), KV в FP8, NVFP4 или TurboQuant 3 бит, MTP и EAGLE. Выигрывает при многих запросах сразу; одному пользователю llama.cpp не уступает.' },
+    ktrans: { label: 'KTransformers / ik_llama.cpp (CPU + GPU)', vendors: ['nvidia', 'amd'], discreteOnly: true, modes: ['experts'], kv: ['FP16', 'Q8_0'], syncMs: 0.15,
+      fmts: ['gguf', 'any'], mtp: () => true,
+      note: 'Для больших MoE на одной видеокарте: экспертов в ОЗУ считает процессор (AMX, AVX-512), внимание и KV — на видеокарте. MTP у GLM и Qwen 3.5+.' },
+    strata: { label: 'Strata (Flash-Next, Qwen3.6, DeepSeek V4.1)', vendors: ['nvidia', 'amd', 'intel', 'apple'], strataOnly: true, minVramGB: 12,
+      modes: ['experts', 'ssd'], ssd: true, kv: ['FP16'], fmts: ['gguf', 'fp4', 'any'], mtp: () => true, syncMs: 0.07, ubatch: 4096,
+      note: 'Узкая: только Qwen3.8-Flash-Next, Qwen3.6 и DeepSeek V4.1 Flash. На видеокарте внимание, общие эксперты, KV и кэш горячих экспертов; остальные эксперты в ОЗУ, n-gram/Engram — на SSD; MTP ×1,6–1,8. Нужна карта от 12 ГБ.' },
+    stream: { label: 'Подкачка с SSD (flash-moe, AirLLM)', vendors: ALL, moeOnly: true, modes: ['ssd'], ssd: true, kv: ['FP16', 'Q8_0', 'Q4_0'],
+      fmts: ['mlx', 'gguf', 'any'], mtp: () => false,
+      note: 'Эксперты MoE читаются с SSD по мере надобности, в памяти только горячие. Запускает модели больше памяти, но это единицы ток/с: для проб, не для работы.' },
+  };
+  const NON_EXPERT_SHARE = 0.4;   // доля активных весов MoE вне экспертов: внимание, роутер, общие эксперты (оценка)
+  const MTP_GAIN = 1.6;           // MTP-голова как черновик: замеры 1,6–1,8 (Strata), 1,6–2,7 (MTPLX), 1,4–1,7 (llama.cpp на CUDA)
+  const PCIE_GBs = 25;            // PCIe 4.0 x16 на практике: по ней при чтении промпта гоняются эксперты из ОЗУ
+  const UBATCH = 2048;            // токенов промпта на один проход экспертов
+  const SSD_HIT_POWER = 0.2;
+  // Задержка на слой при генерации (запуск ядер, синхронизация), мс. Калибровка: gpt-oss-120b на M5 Max — 76 ток/с
+  // против 75–79 в замере (без неё 129); Qwen3.5-35B-A3B на RTX 5090 — 194 в замере. Плюс syncMs оболочки на слой,
+  // когда часть работы на процессоре: llama.cpp --n-cpu-moe на RTX 3060 — 41 ток/с в замере.
+  const LAYER_MS = { apple: 0.19, cpu: 0.02 }, LAYER_MS_GPU = 0.09;      // попадание в кэш горячих экспертов = (доля кэша)^0,2: калибровка по flash-moe (15 % кэша → ~70 %)
+
+  const vendorOfHw = hw => hw.vendor ?? (hw.cpuOnly ? 'cpu' : hw.unified ? 'apple' : 'nvidia');
+  const isMoe = model => model.active < model.params * 0.5;
+  function engineOk(key, model, hw) {
+    const e = ENGINES[key];
+    if (!e || !e.vendors.includes(vendorOfHw(hw))) return false;
+    if (e.strataOnly && !model.strata) return false;
+    if (e.moeOnly && !isMoe(model)) return false;
+    if (e.discreteOnly && hw.unified) return false;
+    if (e.minVramGB && !hw.unified && hw.memGB < e.minVramGB) return false;
+    return true;
+  }
 
   function weightsBytes(params, bpw) { return params * bpw / 8; }
 
@@ -323,11 +409,13 @@ var LLMCalc = (() => {
     return RUNTIME_BYTES + 0.04 * weights + 0.25 * GB + ctx * model.hidden * 2;
   }
 
-  function memoryNeeded({ model, bpw, ctx, kvBits }) {
-    const weights = weightsBytes(model.params, bpw);
+  // ssd — n-gram/Engram-таблицы, которые оболочка держит на диске (в память они не идут)
+  function memoryNeeded({ model, bpw, ctx, kvBits, engine }) {
+    const onSsd = engine && ENGINES[engine]?.ssd ? (model.ssdParams ?? 0) : 0;
+    const weights = weightsBytes(model.params - onSsd, bpw);
     const kv = kvBytesPerToken(model, kvBits, ctx) * ctx;
     const overhead = overheadBytes(weights, model, ctx);
-    return { weights, kv, overhead, total: weights + kv + overhead };
+    return { weights, kv, overhead, ssd: weightsBytes(onSsd, bpw), total: weights + kv + overhead };
   }
 
   // На каждый новый токен читаются активные веса и весь KV-кэш
@@ -335,76 +423,162 @@ var LLMCalc = (() => {
     return weightsBytes(model.active, bpw) + kvBytesPerToken(model, kvBits, ctx) * ctx;
   }
 
-  function genTokPerSec(bandwidthGBs, bytesPerToken) { return bandwidthGBs * 1e9 * BW_EFF / bytesPerToken; }
-  function prefillTokPerSec(tflops, model) { return tflops * 1e12 * COMPUTE_EFF / (2 * model.active); }
-  function requiredBandwidthGBs(bytesPerToken, targetTps) { return bytesPerToken * targetTps / BW_EFF / 1e9; }
-  function requiredTflops(model, promptTokens, seconds) { return 2 * model.active * (promptTokens / seconds) / COMPUTE_EFF / 1e12; }
+  // Внимание при чтении промпта длиной P: в среднем 2 × скрытая × P FLOP на токен в слое полного внимания,
+  // в слое со скользящим окном W — не больше 4 × скрытая × W. На коротких промптах почти ноль, на 100K+ — главное.
+  function attnFlopsPerToken(model, P) {
+    if (!P) return 0;
+    const layers = model.kvLayers ?? model.layers, d = model.hidden;
+    const local = model.window && model.localRatio ? model.localRatio : 0;
+    const W = model.window ?? P;
+    const localAvg = P <= W ? 2 * d * P : 4 * d * W * (1 - W / (2 * P));
+    return layers * ((1 - local) * 2 * d * P + local * localAvg);
+  }
 
-  // macOS по умолчанию отдаёт GPU 2/3 памяти при ≤36 ГБ и 3/4 выше (можно поднять через sysctl, но по умолчанию так)
+  function genTokPerSec(bandwidthGBs, bytesPerToken) { return bandwidthGBs * 1e9 * BW_EFF / bytesPerToken; }
+  // Постоянная часть времени на токен: слои × задержка; hybrid — часть работы на процессоре (выгрузка)
+  function stepLatencySec(model, hw, hybrid = false, engine = null) {
+    const per = LAYER_MS[vendorOfHw(hw)] ?? LAYER_MS_GPU;
+    const sync = hybrid ? (engine ? ENGINES[engine].syncMs ?? 0.3 : 0.3) : 0;
+    return model.layers * (per + sync) / 1000;
+  }
+  function prefillTokPerSec(tflops, model, promptTokens = 0) {
+    return tflops * 1e12 * COMPUTE_EFF / (2 * model.active + attnFlopsPerToken(model, promptTokens));
+  }
+  // latencySec — постоянная часть времени на токен: если цель быстрее неё, никакая память не поможет (Infinity)
+  function requiredBandwidthGBs(bytesPerToken, targetTps, latencySec = 0) {
+    const left = 1 / targetTps - latencySec;
+    return left > 0 ? bytesPerToken / left / BW_EFF / 1e9 : Infinity;
+  }
+  function requiredTflops(model, promptTokens, seconds) {
+    return (2 * model.active + attnFlopsPerToken(model, promptTokens)) * (promptTokens / seconds) / COMPUTE_EFF / 1e12;
+  }
+
+  // macOS по умолчанию отдаёт GPU 2/3 памяти при ≤36 ГБ и 3/4 выше (можно поднять через sysctl, но по умолчанию так).
+  // У коробок на Linux (GB10, Jetson, Gorgon Halo) доля своя — gpuShare.
   function usableMemoryBytes(hw) {
     const total = hw.memGB * GB;
     if (hw.cpuOnly) return total * OS_RESERVE_SYS;
-    if (hw.unified) return total * (hw.memGB <= 36 ? 2 / 3 : 3 / 4);
+    if (hw.unified) return total * (hw.gpuShare ?? (hw.memGB <= 36 ? 2 / 3 : 3 / 4));
     return total;
   }
 
+  // cfg.engine — ключ ENGINES (без него — как llama.cpp без MTP: только выгрузка слоёв); cfg.promptTokens — для цены внимания
   function fit(cfg, hw) {
+    const e = cfg.engine ? ENGINES[cfg.engine] : null;
+    const modes = e ? e.modes : ['layers'];
+    const { model, bpw } = cfg;
     const mem = memoryNeeded(cfg);
-    const usable = usableMemoryBytes(hw);
+    const usable = usableMemoryBytes(hw) * (e?.usable ?? 1);
     const bytes = bytesPerGeneratedToken(cfg);
-    const base = { need: mem.total, usable, mem, bytesPerToken: bytes };
+    const mtpGain = e && model.mtp && e.mtp({ ...hw, vendor: vendorOfHw(hw) }) ? MTP_GAIN : 1;
+    const gpuBw = hw.bandwidthGBs * 1e9 * BW_EFF;
+    const gpuPre = prefillTokPerSec(hw.tflops, model, cfg.promptTokens);
+    const base = { need: mem.total, usable, mem, bytesPerToken: bytes, engine: cfg.engine, mtpGain };
+    const lat = stepLatencySec(model, hw), latHybrid = stepLatencySec(model, hw, true, cfg.engine);
     if (mem.total <= usable) {
-      return { ...base, status: 'fits', gpuFraction: 1,
-        genTps: genTokPerSec(hw.bandwidthGBs, bytes), prefillTps: prefillTokPerSec(hw.tflops, cfg.model) };
+      return { ...base, status: 'fits', gpuFraction: 1, genTps: mtpGain / (bytes / gpuBw + lat), prefillTps: gpuPre, latency: lat };
     }
     const sysUsable = hw.unified ? 0 : (hw.sysMemGB ?? 0) * GB * OS_RESERVE_SYS;
-    if (mem.total <= usable + sysUsable) {
+    const sysBw = (hw.sysBandwidthGBs ?? 0) * 1e9 * BW_EFF;
+    const options = [];
+    if (modes.includes('layers') && !hw.unified && mem.total <= usable + sysUsable) {
       const f = usable / mem.total;
-      const tGen = f * bytes / (hw.bandwidthGBs * 1e9 * BW_EFF) + (1 - f) * bytes / (hw.sysBandwidthGBs * 1e9 * BW_EFF);
-      const tPre = f / prefillTokPerSec(hw.tflops, cfg.model) + (1 - f) / prefillTokPerSec(hw.sysTflops ?? 1, cfg.model);
-      return { ...base, status: 'offload', gpuFraction: f, genTps: 1 / tGen, prefillTps: 1 / tPre };
+      const tGen = f * bytes / gpuBw + (1 - f) * bytes / sysBw + latHybrid;
+      const tPre = f / gpuPre + (1 - f) / prefillTokPerSec(hw.sysTflops ?? 1, model, cfg.promptTokens);
+      options.push({ status: 'offload', gpuFraction: f, genTps: mtpGain / tGen, prefillTps: 1 / tPre, latency: latHybrid });
     }
-    return { ...base, status: 'nofit', gpuFraction: 0, genTps: 0, prefillTps: 0 };
+    // MoE: на GPU внимание, общие веса и KV; эксперты — в ОЗУ (experts) или на SSD с кэшем горячих в памяти (ssd)
+    if (isMoe(model) && (modes.includes('experts') || modes.includes('ssd'))) {
+      const act = weightsBytes(model.active, bpw), shared = act * NON_EXPERT_SHARE, expAct = act - shared;
+      const experts = mem.weights - shared;
+      const gpuNeed = shared + mem.kv + mem.overhead;
+      if (gpuNeed <= usable) {
+        const tShared = (shared + mem.kv) / gpuBw + latHybrid;
+        const ub = e?.ubatch ?? UBATCH;
+        const spare = usable - gpuNeed;
+        if (modes.includes('experts') && !hw.unified) {
+          const onGpu = Math.min(experts, spare), ramNeed = experts - onGpu, c = onGpu / experts;
+          if (ramNeed <= sysUsable) {
+            const t = tShared + expAct * (c / gpuBw + (1 - c) / sysBw);
+            options.push({ status: 'experts', gpuFraction: (gpuNeed + onGpu) / mem.total, gpuNeed: gpuNeed + onGpu, ramNeed,
+              genTps: mtpGain / t, prefillTps: 1 / (1 / gpuPre + ramNeed / (PCIE_GBs * 1e9) / ub), latency: latHybrid });
+          }
+        }
+        if (modes.includes('ssd')) {
+          const cache = spare + sysUsable, ramBw = hw.unified ? gpuBw : sysBw;
+          const tBase = hw.unified ? (shared + mem.kv) / gpuBw + lat : tShared;
+          const hit = Math.min(0.9, Math.pow(Math.min(1, cache / experts), SSD_HIT_POWER));
+          const ssdBw = (hw.ssdGBs ?? 6) * 1e9;
+          const t = tBase + expAct * (hit / ramBw + (1 - hit) / ssdBw);
+          options.push({ status: 'ssd', gpuFraction: gpuNeed / mem.total, gpuNeed, ramNeed: Math.min(cache, experts), ssdHit: hit,
+            genTps: mtpGain / t, prefillTps: 1 / (1 / gpuPre + experts * (1 - hit) / ssdBw / ub), latency: tBase - (shared + mem.kv) / gpuBw });
+        }
+      }
+    }
+    if (!options.length) return { ...base, status: 'nofit', gpuFraction: 0, genTps: 0, prefillTps: 0 };
+    options.sort((a, b) => b.genTps - a.genTps);
+    return { ...base, ...options[0] };
   }
 
-  // Наибольший контекст, при котором всё влезает целиком в память ускорителя (двоичный поиск, память монотонна по ctx)
-  function maxContext(cfg, hw) {
+  const RUNS = ['fits', 'experts', 'offload', 'ssd'];
+  // Наибольший контекст, при котором модель остаётся в одном из режимов statuses (по умолчанию — целиком в памяти ускорителя)
+  function maxContext(cfg, hw, statuses = ['fits']) {
     let lo = 0, hi = 1 << 22;
-    if (fit({ ...cfg, ctx: lo }, hw).status !== 'fits') return 0;
+    if (!statuses.includes(fit({ ...cfg, ctx: lo }, hw).status)) return 0;
     while (hi - lo > 1) {
       const mid = (lo + hi) >> 1;
-      if (fit({ ...cfg, ctx: mid }, hw).status === 'fits') lo = mid; else hi = mid;
+      if (statuses.includes(fit({ ...cfg, ctx: mid }, hw).status)) lo = mid; else hi = mid;
     }
     return lo;
   }
 
+  // Эксперты в ОЗУ у MoE — рабочий режим (так задуманы Strata и KTransformers), поэтому может быть «удобно»
   function verdict(f, goal) {
     if (f.status === 'nofit') return 'bad';
     const promptSec = goal.promptTokens / f.prefillTps;
     const genOk = f.genTps >= goal.genTps, preOk = promptSec <= goal.promptSeconds;
-    if (f.status === 'fits' && genOk && preOk) return 'good';
+    if ((f.status === 'fits' || f.status === 'experts') && genOk && preOk) return 'good';
     if (f.genTps >= goal.genTps / 2 && promptSec <= goal.promptSeconds * 3) return 'ok';
     return 'bad';
   }
+
+  // KV-кэш, который оболочка умеет: если выбранного нет — ближайший поддерживаемый не меньше (иначе FP16)
+  function kvFor(engine, kvBits) {
+    const ok = ENGINES[engine].kv.map(k => KV_QUANTS[k]).sort((a, b) => a - b);
+    return ok.find(b => b >= kvBits) ?? ok[ok.length - 1];
+  }
+
+  // Все оболочки, которые запустятся на этом железе с этой моделью, от лучшей к худшей
+  function rankEngines(cfg, hw) {
+    const score = f => (f.status === 'fits' || f.status === 'experts' ? 2 : f.status === 'nofit' ? 0 : 1) * 1e6 + f.genTps;
+    return Object.keys(ENGINES).filter(k => engineOk(k, cfg.model, hw))
+      .map(k => ({ engine: k, fit: fit({ ...cfg, engine: k, kvBits: kvFor(k, cfg.kvBits) }, hw) }))
+      .sort((a, b) => score(b.fit) - score(a.fit));
+  }
+  function bestEngine(cfg, hw) { return rankEngines(cfg, hw)[0] ?? null; }
+
+  const quantFits = (k, engine) => (engine ? ENGINES[engine].fmts : ['gguf', 'any']).includes(QUANTS[k].fmt);
 
   // Диагностика: во что упёрлись и что с этим делать. Возвращает числа, текст собирает интерфейс.
   function diagnose(cfg, hw, goal) {
     const f = fit(cfg, hw);
     const promptSec = f.prefillTps ? goal.promptTokens / f.prefillTps : Infinity;
     const kvShare = f.mem.kv / (f.mem.weights + f.mem.kv);
-    const moe = cfg.model.active < cfg.model.params * 0.5;
-    const byQuality = Object.keys(QUANTS).sort((a, b) => QUANTS[b].bpw - QUANTS[a].bpw);
+    const moe = isMoe(cfg.model);
+    const ok = s => s === 'fits';
+    const byQuality = Object.keys(QUANTS).filter(k => quantFits(k, cfg.engine)).sort((a, b) => QUANTS[b].bpw - QUANTS[a].bpw);
     let bestQuantFits = null, bestQuantMeetsTarget = null;
     for (const k of byQuality) {
       const ff = fit({ ...cfg, bpw: QUANTS[k].bpw }, hw);
-      if (ff.status !== 'fits') continue;
+      if (!ok(ff.status)) continue;
       if (!bestQuantFits) bestQuantFits = k;
       if (!bestQuantMeetsTarget && ff.genTps >= goal.genTps) bestQuantMeetsTarget = k;
     }
-    const kvQ8Fits = cfg.kvBits > 8 && fit({ ...cfg, kvBits: 8 }, hw).status === 'fits';
-    const kvQ4Fits = cfg.kvBits > 4 && fit({ ...cfg, kvBits: 4 }, hw).status === 'fits';
+    const kvOk = k => !cfg.engine || ENGINES[cfg.engine].kv.includes(k);
+    const kvQ8Fits = kvOk('Q8_0') && cfg.kvBits > KV_QUANTS.Q8_0 && ok(fit({ ...cfg, kvBits: KV_QUANTS.Q8_0 }, hw).status);
+    const kvQ4Fits = kvOk('Q4_0') && cfg.kvBits > KV_QUANTS.Q4_0 && ok(fit({ ...cfg, kvBits: KV_QUANTS.Q4_0 }, hw).status);
     // macOS по умолчанию режет память GPU; sysctl iogpu.wired_limit_mb поднимает её примерно до 90 %
-    const macWiredLimitHelps = !!(hw.unified && !hw.cpuOnly && f.status !== 'fits' && f.need <= hw.memGB * GB * 0.9);
+    const macWiredLimitHelps = !!(hw.unified && !hw.cpuOnly && vendorOfHw(hw) === 'apple' && f.status !== 'fits' && f.need <= hw.memGB * GB * 0.9);
     // MoE: эксперты в ОЗУ, внимание и KV на GPU — читаются только активные веса через шину ОЗУ
     // (для nofit — оценка «если бы ОЗУ хватило», чтобы совет добавить память был с числом)
     let expertOffloadTps = null;
@@ -415,13 +589,17 @@ var LLMCalc = (() => {
     }
     let bottleneck;
     if (f.status === 'nofit') bottleneck = 'memory';
-    else if (f.status === 'offload') bottleneck = 'offload';
+    else if (f.status !== 'fits' && f.status !== 'experts') bottleneck = 'offload';
     else if (f.genTps < goal.genTps) bottleneck = 'bandwidth';
     else if (promptSec > goal.promptSeconds) bottleneck = 'compute';
     else bottleneck = 'none';
+    // Другие оболочки, которые на этом железе дадут больше
+    const engines = rankEngines(cfg, hw);
+    const better = engines.filter(r => r.engine !== cfg.engine && r.fit.status !== 'nofit'
+      && (f.status === 'nofit' || (RUNS.indexOf(r.fit.status) < RUNS.indexOf(f.status)) || r.fit.genTps > f.genTps * 1.15));
     return { bottleneck, fit: f, promptSec, kvShare, moe, bestQuantFits, bestQuantMeetsTarget, kvQ8Fits, kvQ4Fits,
-      macWiredLimitHelps, expertOffloadTps,
-      requiredBandwidthGBs: requiredBandwidthGBs(f.bytesPerToken, goal.genTps),
+      macWiredLimitHelps, expertOffloadTps, engines, betterEngines: better,
+      requiredBandwidthGBs: requiredBandwidthGBs(f.bytesPerToken, goal.genTps / (f.mtpGain ?? 1), stepLatencySec(cfg.model, hw)),
       requiredTflops: requiredTflops(cfg.model, goal.promptTokens, goal.promptSeconds) };
   }
 
@@ -439,7 +617,8 @@ var LLMCalc = (() => {
     return LAYER_ANCHORS[LAYER_ANCHORS.length - 1][1];
   }
 
-  return { GB, BW_EFF, COMPUTE_EFF, QUANTS, KV_QUANTS, MODELS, HARDWARE,
-    weightsBytes, kvBytesPerToken, memoryNeeded, bytesPerGeneratedToken, genTokPerSec, prefillTokPerSec,
-    requiredBandwidthGBs, requiredTflops, usableMemoryBytes, fit, maxContext, verdict, diagnose, estimateLayers };
+  return { GB, BW_EFF, COMPUTE_EFF, QUANTS, KV_QUANTS, KV_LABELS, MODELS, HARDWARE, ENGINES, NON_EXPERT_SHARE, MTP_GAIN,
+    weightsBytes, kvBytesPerToken, memoryNeeded, bytesPerGeneratedToken, genTokPerSec, prefillTokPerSec, attnFlopsPerToken, stepLatencySec,
+    requiredBandwidthGBs, requiredTflops, usableMemoryBytes, fit, maxContext, verdict, diagnose, estimateLayers,
+    engineOk, kvFor, rankEngines, bestEngine };
 })();
