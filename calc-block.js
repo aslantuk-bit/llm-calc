@@ -224,6 +224,8 @@ var LLMCalc = (() => {
           q: 'ровно 4 бит', note: 'размер по mtplx.com; для 96 ГБ и больше' },
         { label: 'MTPLX Optimized Quality', repo: HF + 'Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality', sizeGB: 169.96, engines: ['mlx'], ssd: true, quant: 'MLX8',
           q: '8 бит, таблицы 4', note: 'по mtplx.com — для 256 ГБ' },
+        { label: 'oMLX oQ4e-mtp', repo: 'oMLX (github.com/jundot/omlx), сборка oQ4e-mtp', sizeGB: 105.5, engines: ['mlx'], ssd: false, quant: 'MLX4',
+          q: '4 бит', note: 'в памяти 104–107 ГБ (проверка 27.10.2026); KV-кэш на SSD; замер: 110–120 ток/с на 16K, 64–76 на 128K, промпт ~2,8K ток/с' },
         { label: 'MLX 4-bit + MTP', repo: HF + 'mlx-community/Qwen3.8-Flash-Next-4bit-mtp', sizeGB: 113.27, engines: ['mlx'], ssd: false, quant: 'MLX4',
           q: '4 бит', note: 'mlx-lm с MTP-головой; таблицы в памяти' },
         { label: 'MLX 4-bit', repo: HF + 'mlx-community/Qwen3.8-Flash-Next-4bit', sizeGB: 111.55, engines: ['mlx'], ssd: false, mtp: false, quant: 'MLX4',
