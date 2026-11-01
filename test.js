@@ -196,8 +196,8 @@ test('диагностика: влезает, но медленно — проп
   const m4pro = { unified: true, memGB: 64, bandwidthGBs: 273, tflops: 9.2 };
   const d = C.diagnose({ model: l70, bpw: 4.85, ctx: 8192, kvBits: 16 }, m4pro, { ...goal, genTps: 5 });
   assert.strictEqual(d.bottleneck, 'bandwidth');
-  // с задержкой 80 слоёв × 0,19 мс: Q4_K_M ~4,0 ток/с, Q3_K_M ~4,8, Q2_K ~5,4 → под цель 5 подходит Q2_K
-  assert.strictEqual(d.bestQuantMeetsTarget, 'Q2_K');
+  // плотная: задержка 80 слоёв × 0,19 × 0,2 мс; Q4_K_M ~4,4 ток/с, Q3_K_M ~5,4 → под цель 5 подходит Q3_K_M
+  assert.strictEqual(d.bestQuantMeetsTarget, 'Q3_K_M');
 });
 
 test('диагностика: генерация в норме, промпт медленный — вычисления', () => {
@@ -324,8 +324,9 @@ test('эксперты в ОЗУ: внимание и общие веса на G
 });
 
 test('задержка на слой: Mac 0,19 мс, видеокарты 0,09, при выгрузке плюс синхронизация оболочки', () => {
-  near(C.stepLatencySec(llama8b, mac128), 32 * 0.19e-3, 1e-9, 'Mac');
-  near(C.stepLatencySec(llama8b, rtx5070), 32 * 0.09e-3, 1e-9, 'NVIDIA');
+  near(C.stepLatencySec(llama8b, mac128), 32 * 0.19e-3 * 0.2, 1e-9, 'Mac, плотная');
+  near(C.stepLatencySec(moe120, mac128), moe120.layers * 0.19e-3, 1e-9, 'Mac, MoE');
+  near(C.stepLatencySec(llama8b, rtx5070), 32 * 0.09e-3 * 0.2, 1e-9, 'NVIDIA, плотная');
   assert.ok(C.stepLatencySec(llama8b, rtx5070, true, 'strata') < C.stepLatencySec(llama8b, rtx5070, true, 'llama.cpp'), 'Strata синхронизируется быстрее');
 });
 
@@ -424,6 +425,36 @@ test('Strata на M5 Max: Flash-Next UD-Q4_K_XL ≈ 94 ток/с, DeepSeek V4.1 
   const g = C.fit({ model: ds, bpw: 2.25, ctx: 32768, kvBits: 16, engine: 'strata', promptTokens: 4096 }, m5max128);
   assert.strictEqual(g.status, 'ssd');
   assert.ok(g.genTps >= 11 && g.genTps <= 20, `DeepSeek V4.1 на Strata: ${g.genTps}`);
+});
+
+test('сборки DeepSeek V4.1 на M5 Max 128: Engram отдельным файлом, Strata и ds4 по замерам', () => {
+  const ds = C.MODELS.find(md => md.name.startsWith('DeepSeek V4.1 Flash'));
+  const b = C.buildsFor(ds).find(x => x.label.startsWith('ISTA-DASLab IQ2_XS'));
+  near(C.buildBpw(ds, b), 155.2 * 8 / 567, 0.01, 'биты основной части');
+  const rows = C.compareBuilds(ds, m5max128, { kvBits: 16, ctxs: [32768] });
+  const ista = rowOf(rows, b.label), ds4 = rowOf(rows, 'ds4 Q2 (antirez)');
+  assert.strictEqual(ista.engine, 'strata');
+  assert.strictEqual(ista.runs[0].fit.status, 'ssd');
+  assert.ok(ista.runs[0].fit.genTps >= 11 && ista.runs[0].fit.genTps <= 20, `Strata: ${ista.runs[0].fit.genTps}`);
+  near(ds4.runs[0].fit.genTps, 13.4, 13.4 * 0.2, 'ds4 Q2');
+  // таблицы на SSD не входят в память, а при загрузке целиком — входят по своему размеру
+  const cfg = { model: ds, bpw: 2.19, ctx: 4096, kvBits: 16, tablesBytes: 110.6e9 };
+  near(C.memoryNeeded({ ...cfg, engine: 'llama.cpp' }).weights - C.memoryNeeded({ ...cfg, engine: 'strata' }).weights, 110.6e9, 1, 'Engram');
+});
+
+test('ds4 — только DeepSeek V4 и только Mac', () => {
+  const ds = C.MODELS.find(md => md.name.startsWith('DeepSeek V4.1 Flash'));
+  assert.ok(C.engineOk('ds4', ds, m5max128));
+  assert.ok(!C.engineOk('ds4', flashNext, m5max128));
+  assert.ok(!C.engineOk('ds4', ds, rtx5070));
+});
+
+test('сборки Qwen3.8 27B на M5 Max 128: MTPLX с MTP ×2,3–3,0 по замеру', () => {
+  const q27 = C.MODELS.find(md => md.name.startsWith('Qwen3.8 27B'));
+  const rows = C.compareBuilds(q27, m5max128, { kvBits: 16, ctxs: [4096] });
+  near(rowOf(rows, 'MTPLX Optimized Quality').runs[0].fit.genTps, 40.6, 40.6 * 0.2, 'Optimized Quality');
+  near(rowOf(rows, 'MTPLX Bare Speed').runs[0].fit.genTps, 65.2, 65.2 * 0.25, 'Bare Speed');
+  assert.ok(rowOf(rows, 'MLX 8-bit').runs[0].fit.genTps < 20, 'без MTP 8 бит медленно');
 });
 
 let failed = 0;

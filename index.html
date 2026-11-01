@@ -118,9 +118,9 @@
       <details><summary>Как считается</summary>
         Память = параметры × бит на вес ÷ 8 + KV-кэш на токен × контекст + накладные (0,75 ГБ + 4 % весов + буфер вычислений под контекст, с flash attention). N-gram- и Engram-таблицы (Qwen3.8-Flash-Next, DeepSeek V4.1) оболочки MLX и Strata держат на SSD.
         KV на токен = 2 × слои × KV-головы × размер головы × байт (для MLA — один вектор, для скользящего окна локальные слои держат только окно). Q8_0 и Q4_0 — это 8,5 и 4,5 бита: масштаб хранится на каждые 32 числа.
-        Время на токен = байт на токен ÷ (пропускная способность × 0,7) + слои × задержка на слой (0,19 мс на Mac, 0,09 на видеокартах; при выгрузке в ОЗУ ещё 0,07–0,3 мс в зависимости от оболочки). MTP-голова модели в оболочке, которая её поддерживает, ускоряет генерацию в 1,6 раза.
+        Время на токен = байт на токен ÷ (пропускная способность × 0,7) + слои × задержка на слой (0,19 мс на Mac, 0,09 на видеокартах; у плотных моделей впятеро меньше — нет маршрутизации экспертов; при выгрузке в ОЗУ ещё 0,07–0,3 мс в зависимости от оболочки). MTP-голова модели в оболочке, которая её поддерживает, ускоряет генерацию в 1,6 раза.
         Промпт: TFLOPS = (2 × активные параметры + внимание) × токенов в секунду ÷ 0,5; внимание растёт с длиной промпта и на 100K+ токенов становится главной статьёй.
-        Эксперты в ОЗУ (MoE): на видеокарте внимание, общие веса (≈ 40 % активных) и KV, свободная видеопамять — под часть экспертов; остальные эксперты читаются из ОЗУ. Калибровка по замерам: gpt-oss-120b на M5 Max, Qwen3.5/3.6-35B-A3B на RTX 3060 и RTX 5090, Strata на RTX 5070, flash-moe на M3 Max, MTPLX и Strata с Qwen3.8-Flash-Next на M5 Max — расхождение в пределах ±25 %. Подкачка с SSD: доля попаданий в кэш горячих экспертов = (доля кэша)^0,2 у flash-moe и ^0,9 у Strata (калибровка по DeepSeek V4.1 Flash на M5 Max: 13–17,6 ток/с).
+        Эксперты в ОЗУ (MoE): на видеокарте внимание, общие веса (≈ 40 % активных) и KV, свободная видеопамять — под часть экспертов; остальные эксперты читаются из ОЗУ. Калибровка по замерам: gpt-oss-120b на M5 Max, Qwen3.5/3.6-35B-A3B на RTX 3060 и RTX 5090, Strata на RTX 5070, flash-moe на M3 Max, MTPLX и Strata с Qwen3.8-Flash-Next на M5 Max — расхождение в пределах ±25 %. Подкачка с SSD: доля попаданий в кэш горячих экспертов = (доля кэша)^0,2 у flash-moe ^0,9 у Strata и ^0,5 у ds4 (калибровка по DeepSeek V4.1 Flash на M5 Max: 13–17,6 и 13,4 ток/с).
       </details>
     </section>
     <section class="card">
@@ -405,6 +405,88 @@ var LLMCalc = (() => {
           q: 'почти без потерь', note: 'размер — оценка; только видеокарты' },
       ],
     },
+    'DeepSeek V4.1 Flash': {
+      note: 'Размеры — из списков файлов на Hugging Face (01.11.2026). Engram-таблицы (196 млрд параметров) во всех сборках — отдельный файл: IQ4_NL 110,6 ГБ у ISTA-DASLab и Unsloth, FP8 202,8 ГБ у ds4; бит на вес считается только по основной части. Качество: у ISTA — доля среднего балла оригинала по AIME25, GPQA-D и LiveCodeBench; у Unsloth — KLD к оригиналу и совпадение первого токена.',
+      howTitle: 'Откуда сборки и что проверено',
+      how: 'Официальная сборка — FP8 плюс FP4-эксперты, 510 ГБ; NVIDIA NVFP4 — 429 ГБ; обе только для серверов. Основная часть модели у любой сборки — от 120 ГБ, поэтому на Mac 128 ГБ целиком она не влезает: эксперты подкачиваются с SSD. Замеры на M5 Max 128 ГБ: Strata 0.2.9 с ISTA 2,25 бита — 13–17,6 ток/с (по умолчанию 5–6,7 из-за бага #4771, обход DS4_BUSY_CAP=2000), промпт 240–500 ток/с; ds4 с V4.1 Flash Q2 — 13,4 ток/с. Числа 34–39 ток/с у ds4 относятся к прошлой V4 Flash (284B), которая влезает в память. Для сравнения: M3 Ultra 256 ГБ — 21–45 ток/с (ds4, Rapid-MLX), три M5 Max по Thunderbolt — 35,6. В Ollama есть только облачные теги. Не включены: OrcaRouter abliterated (Mix-128G 224,6 ГБ), Strata-сборка kaushikvira GSQ-agentic (под карту 72 ГБ), mlx-community MLX-2bit/4bit без проверенной базы.',
+      list: [
+        { label: 'ISTA-DASLab IQ2_XS (2,25 бита)', repo: HF + 'ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF', sizeGB: 265.8, tablesGB: 110.6, engines: ['strata', 'llama.cpp', 'ktrans'], quant: 'IQ2_XXS', rec: 'в комплекте',
+          q: '99,8 % оригинала', note: 'в Strata — ist-das-2.25bpw; основная часть 155,2 ГБ' },
+        { label: 'ISTA-DASLab IQ2_XXS (2,00 бита)', repo: HF + 'ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF', sizeGB: 248.8, tablesGB: 110.6, engines: ['strata', 'llama.cpp', 'ktrans'], quant: 'IQ2_XXS',
+          q: '100 % оригинала', note: 'в Strata — ist-das-2.00bpw; основная часть 138,2 ГБ' },
+        { label: 'ISTA-DASLab IQ1_M (1,75 бита)', repo: HF + 'ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF', sizeGB: 231.3, tablesGB: 110.6, engines: ['strata', 'llama.cpp', 'ktrans'], quant: 'IQ2_XXS',
+          q: '98,7 % оригинала', note: 'основная часть 120,7 ГБ — ближе всего к памяти Mac 128' },
+        { label: 'ds4 Q2 (antirez)', repo: HF + 'antirez/deepseek-v4.1-flash-gguf', sizeGB: 365.7, tablesGB: 202.8, engines: ['ds4'], quant: 'Q2_K',
+          q: 'нет замера', note: 'эксперты IQ2_XXS/Q2_K, Engram FP8; сборка из V4.1 Flash без 1017' },
+        { label: 'ds4 Q2 1017 (nazeshinjite)', repo: HF + 'nazeshinjite/DeepSeek-V4.1-Flash-1017-ds4-GGUF', sizeGB: 365.7, tablesGB: 202.8, engines: ['ds4'], quant: 'Q2_K',
+          q: 'нет замера', note: '2,36 бита с imatrix из весов 1017; у автора «до 20 ток/с на 128 ГБ» — не проверено' },
+        { label: 'ds4 Q4 (antirez)', repo: HF + 'antirez/deepseek-v4.1-flash-gguf', sizeGB: 518.6, tablesGB: 202.8, engines: ['ds4'], quant: 'Q4_K_M',
+          q: 'нет замера', note: 'эксперты Q4_K' },
+        { label: 'Unsloth UD-IQ1_S', repo: HF + 'unsloth/DeepSeek-V4.1-Flash-1017-GGUF', sizeGB: 233.0, tablesGB: 110.6, engines: ['strata', 'llama.cpp', 'ktrans'], quant: 'IQ2_XXS',
+          q: 'KLD 0,46', note: 'совпадение 83 %; таблицы считаю IQ4_NL — Unsloth кладёт их последним шардом' },
+        { label: 'Unsloth UD-IQ2_XXS', repo: HF + 'unsloth/DeepSeek-V4.1-Flash-1017-GGUF', sizeGB: 300.5, tablesGB: 110.6, engines: ['strata', 'llama.cpp', 'ktrans'], quant: 'IQ2_XXS',
+          q: 'KLD 0,20', note: 'совпадение 90,5 %' },
+        { label: 'Unsloth UD-Q2_K_XL', repo: HF + 'unsloth/DeepSeek-V4.1-Flash-1017-GGUF', sizeGB: 334.8, tablesGB: 110.6, engines: ['strata', 'llama.cpp', 'ktrans'], quant: 'Q2_K',
+          q: 'KLD 0,14', note: 'совпадение 91,5 %' },
+        { label: 'Unsloth UD-IQ3_XXS', repo: HF + 'unsloth/DeepSeek-V4.1-Flash-1017-GGUF', sizeGB: 394.7, tablesGB: 110.6, engines: ['strata', 'llama.cpp', 'ktrans'], quant: 'IQ3_XXS',
+          q: 'KLD 0,06', note: 'совпадение 94,6 %' },
+        { label: 'Unsloth UD-Q4_K_XL', repo: HF + 'unsloth/DeepSeek-V4.1-Flash-1017-GGUF', sizeGB: 500.7, tablesGB: 110.6, engines: ['strata', 'llama.cpp', 'ktrans'], quant: 'Q4_K_M',
+          q: 'KLD 0,009', note: 'совпадение 98 %; почти оригинал' },
+        { label: 'MLX oQ2e-mtp', repo: HF + 'mlx-community/DeepSeek-V4.1-Flash-1017-oQ2e-mtp', sizeGB: 313.3, tablesGB: 122.9, engines: ['mlx'], ssd: true, quant: 'MLX4',
+          q: 'нет замера', note: 'смешанные 2 бита с MTP; Engram считаю как у oQ4e (122,9 ГБ)' },
+        { label: 'MLX oQ4e-mtp', repo: HF + 'mlx-community/DeepSeek-V4.1-Flash-1017-oQ4e-mtp', sizeGB: 432.0, tablesGB: 122.9, engines: ['mlx'], ssd: true, quant: 'MLX4',
+          q: 'нет замера', note: 'основная часть 300 ГБ' },
+        { label: 'Rapid-MLX GPTQ', repo: HF + 'rapid-mlx/DeepSeek-V4.1-Flash-1017-MLX', sizeGB: 338.8, tablesGB: 122.9, engines: ['mlx'], ssd: true, quant: 'MLX4',
+          q: 'нет замера', note: 'в памяти ~216 ГБ — для Mac 256 ГБ; на M3 Ultra 33–45 ток/с' },
+        { label: 'NVIDIA NVFP4', repo: HF + 'nvidia/DeepSeek-V4.1-Flash-1017-NVFP4', sizeGB: 429.0, engines: ['vllm'], vendors: ['nvidia'], quant: 'NVFP4',
+          q: 'FP4 с калибровкой', note: 'серверы на Blackwell' },
+        { label: 'DeepSeek официальная (FP8 + FP4)', repo: HF + 'deepseek-ai/DeepSeek-V4.1-Flash-1017', sizeGB: 510.3, engines: ['vllm', 'ktrans'], vendors: ['nvidia', 'amd'], quant: 'Q8_0',
+          q: 'оригинал', note: 'Engram внутри' },
+      ],
+    },
+    'Qwen3.8 27B': {
+      note: 'Размеры — из списков файлов на Hugging Face и ollama.com (01.11.2026); бит на вес = размер × 8 ÷ 27 млрд (в некоторые файлы входят зрение и MTP-голова, поэтому бит чуть больше). Качество: KL к BF16 по замерам авторов сборок (MTPLX — свой набор задач по коду, bartowski — wiki); меньше — ближе к оригиналу. MTPLX угадывает по 3 токена вперёд: ×2,3 к скорости у 4-битных сборок и ×3,0 у 8-битной (замер на M5 Max 128 ГБ).',
+      howTitle: 'Откуда сборки и что проверено',
+      how: 'Замеры MTPLX на MacBook Pro M5 Max 128 ГБ (mtplx.com/benchmarks, версии 2.7–2.12): задача по коду — Bare Speed 65,2 ток/с, Optimized Speed 58,7, Optimized Quality 40,6; после промпта 16K — 51,0; на 88K контекста — 30,4, на 147K — 18,4 (калькулятор на длинном контексте завышает: MTP угадывает хуже); промпт на 88K — 535 ток/с, калькулятор занижает его почти вдвое (~290). Там же oMLX 0.5.7 со своей 4-битной MTP-сборкой — 63,3, LM Studio на длинном ответе — 17,4 против 32,4 у MTPLX. Strata Qwen3.8 27B не поддерживает (только Qwen3.6/3.5 27B). В llama.cpp MTP работает с b10896 (bartowski, ggml-org кладут MTP в сборку), но на Mac выигрыша пока нет. Есть ещё unsloth (все кванты от IQ1_S до BF16, без KLD), lmstudio-community GGUF и MLX 4/6/8 бит, производные (abliterated, Uncensored, Swift, Coder390) — их качество не проверено.',
+      list: [
+        { label: 'MTPLX Optimized Speed', repo: HF + 'Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed', sizeGB: 20.70, engines: ['mlx'], mtpGain: 2.3, quant: 'MLX4',
+          q: 'KL 0,022', note: '4 бит, чувствительные слои выше; в памяти 23,6 ГБ' },
+        { label: 'MTPLX Optimized Quality', repo: HF + 'Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality', sizeGB: 29.97, engines: ['mlx'], mtpGain: 3.0, quant: 'MLX8', rec: 'в комплекте',
+          q: 'KL 0,001', note: '8 бит, чувствительные части 16; практически оригинал' },
+        { label: 'MTPLX Bare Speed', repo: HF + 'Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed', sizeGB: 16.31, engines: ['mlx'], mtpGain: 2.3, quant: 'MLX4',
+          q: 'KL 0,038', note: 'ровно 4 бит' },
+        { label: 'MLX 8-bit', repo: HF + 'mlx-community/Qwen3.8-27B-8bit', sizeGB: 29.53, engines: ['mlx'], mtp: false, quant: 'MLX8',
+          q: 'почти без потерь', note: 'mlx-lm без MTP; то же у lmstudio-community (29,5 ГБ)' },
+        { label: 'MLX 6-bit (LM Studio)', repo: HF + 'lmstudio-community/Qwen3.8-27B-MLX-6bit', sizeGB: 22.80, engines: ['mlx'], mtp: false, quant: 'MLX8',
+          q: 'нет замера', note: 'без MTP' },
+        { label: 'MLX OptiQ-4bit', repo: HF + 'mlx-community/Qwen3.8-27B-OptiQ-4bit', sizeGB: 20.68, engines: ['mlx'], mtp: false, quant: 'MLX4',
+          q: 'нет замера', note: 'смешанные биты по чувствительности; MTP-тензоры приложены, но требуют правки' },
+        { label: 'MLX 4-bit', repo: HF + 'mlx-community/Qwen3.8-27B-4bit', sizeGB: 16.08, engines: ['mlx'], mtp: false, quant: 'MLX4',
+          q: 'нет замера', note: 'без MTP; есть nvfp4 (16,1) и mxfp4 (15,2)' },
+        { label: 'MLX oQ6 (oMLX)', repo: HF + 'mlx-community/Qwen3.8-27B-oQ6', sizeGB: 23.33, engines: ['mlx'], mtp: false, quant: 'MLX8',
+          q: 'нет замера', note: 'есть и oQ4 — 16,7 ГБ' },
+        { label: 'MLX BF16', repo: HF + 'mlx-community/Qwen3.8-27B-bf16', sizeGB: 54.74, engines: ['mlx'], mtp: false, quant: 'FP16',
+          q: 'оригинал', note: 'без MTP' },
+        { label: 'bartowski Q8_0', repo: HF + 'bartowski/Qwen3.8-27B-GGUF', sizeGB: 29.12, engines: ['llama.cpp'], quant: 'Q8_0',
+          q: 'KLD 0,0009', note: 'MTP внутри (llama.cpp b10896+)' },
+        { label: 'bartowski Q6_K', repo: HF + 'bartowski/Qwen3.8-27B-GGUF', sizeGB: 23.86, engines: ['llama.cpp'], quant: 'Q6_K',
+          q: 'нет в выдержке', note: '' },
+        { label: 'bartowski Q5_K_M', repo: HF + 'bartowski/Qwen3.8-27B-GGUF', sizeGB: 20.92, engines: ['llama.cpp'], quant: 'Q5_K_M',
+          q: 'нет в выдержке', note: '' },
+        { label: 'bartowski Q4_K_M', repo: HF + 'bartowski/Qwen3.8-27B-GGUF', sizeGB: 17.44, engines: ['llama.cpp'], quant: 'Q4_K_M',
+          q: 'KLD 0,014', note: 'у Unsloth UD-Q4_K_XL — 17,6 ГБ, у ggml-org Q4_K_M — 19,0' },
+        { label: 'bartowski Q3_K_M', repo: HF + 'bartowski/Qwen3.8-27B-GGUF', sizeGB: 13.40, engines: ['llama.cpp'], quant: 'Q3_K_M',
+          q: 'KLD 0,056', note: '' },
+        { label: 'ISTA-DASLab IQ2_S-mtp', repo: HF + 'ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF', sizeGB: 9.61, engines: ['llama.cpp'], quant: 'IQ2_XXS',
+          q: 'нет замера', note: 'GSQ-RCO; для 16 ГБ' },
+        { label: 'Ollama qwen3.8:27b', repo: 'ollama.com/library/qwen3.8', sizeGB: 18, engines: ['llama.cpp'], quant: 'Q4_K_M',
+          q: 'не указано', note: 'есть и :27b-mlx (18 ГБ)' },
+        { label: 'Qwen FP8 (официальная)', repo: HF + 'Qwen/Qwen3.8-27B-FP8', sizeGB: 30.89, engines: ['vllm'], vendors: ['nvidia', 'amd'], quant: 'Q8_0',
+          q: 'почти без потерь', note: 'с MTP; для видеокарт' },
+        { label: 'NVIDIA NVFP4', repo: HF + 'nvidia/Qwen3.8-27B-NVFP4', sizeGB: 21.95, engines: ['vllm'], vendors: ['nvidia'], quant: 'NVFP4',
+          q: 'FP4 + FP8 во внимании', note: 'только Blackwell' },
+      ],
+    },
   };
   // BUILDS[начало имени модели] = { note, how — пояснения для страницы; list — сборки }
   const buildsInfo = model => { const k = Object.keys(BUILDS).find(p => model.name?.startsWith(p)); return k ? BUILDS[k] : null; };
@@ -558,7 +640,7 @@ var LLMCalc = (() => {
       note: 'Универсальная, любая платформа. Не влезло — слои (-ngl) или эксперты MoE (--n-cpu-moe) уходят в ОЗУ. MTP-головы (--spec-type draft-mtp) с мая 2026; на Mac пока без выигрыша. Ollama и LM Studio работают на ней же. Qwen3.8-Flash-Next в основной ветке пока нет (черновик PR), запускается через Ollama, Strata или ветку Unsloth.' },
     mlx: { label: 'MLX / MTPLX (только Mac)', vendors: ['apple'], modes: [], ssd: true, kv: ['FP16', 'Q8_0', 'Q4_0'],
       fmts: ['mlx', 'any'], mtp: () => true,
-      note: 'Только Mac: mlx-lm 0.32, MTPLX 2.12, LM Studio (движки MLX и oMLX), Ollama (MLX-режим), oMLX, mlx-serve, vllm-mlx. MTPLX использует MTP-голову модели (×1,6–2,7) и держит n-gram-таблицы Qwen3.8-Flash-Next на SSD; обычный mlx-lm грузит их в память.' },
+      note: 'Только Mac: mlx-lm 0.32, MTPLX 2.12, LM Studio (движки MLX и oMLX), Ollama (MLX-режим), oMLX, mlx-serve, vllm-mlx. MTPLX использует MTP-голову модели (×1,6–3,0) и держит n-gram-таблицы Qwen3.8-Flash-Next на SSD; обычный mlx-lm грузит их в память.' },
     vllm: { label: 'vLLM / SGLang', vendors: ['nvidia', 'amd', 'intel'], modes: [], usable: 0.9, kv: ['FP16', 'Q8_0', 'Q4_0', 'TQ3'],
       fmts: ['any', 'fp4', 'gptq'], mtp: () => true,
       note: 'Серверная: всё в видеопамяти (занимает 90 %), KV в FP8, NVFP4 или TurboQuant 3 бит, MTP и EAGLE. Выигрывает при многих запросах сразу; одному пользователю llama.cpp не уступает.' },
@@ -568,12 +650,15 @@ var LLMCalc = (() => {
     strata: { label: 'Strata (Flash-Next, Qwen3.6, DeepSeek V4.1)', vendors: ['nvidia', 'amd', 'intel', 'apple'], strataOnly: true, minVramGB: 12,
       modes: ['experts', 'ssd'], ssd: true, kv: ['FP16'], fmts: ['gguf', 'fp4', 'any'], mtp: () => true, syncMs: 0.07, ubatch: 4096, ssdHitPower: 0.9,
       note: 'Узкая: только Qwen3.8-Flash-Next, Qwen3.6 и DeepSeek V4.1 Flash. На видеокарте внимание, общие эксперты, KV и кэш горячих экспертов; остальные эксперты в ОЗУ, n-gram/Engram — на SSD; MTP ×1,4–1,6. Нужна карта от 12 ГБ; на Mac — macOS 27 (0.2.9 падает на 15 и 26). Замер на M5 Max: Flash-Next UD-Q4_K_XL 94 ток/с с MTP, DeepSeek V4.1 2,25 бита 13–18.' },
-    stream: { label: 'Подкачка с SSD (flash-moe, AirLLM)', vendors: ALL, moeOnly: true, modes: ['ssd'], ssd: true, kv: ['FP16', 'Q8_0', 'Q4_0'],
+    ds4: { label: 'ds4 / DwarfStar (antirez, только DeepSeek V4)', vendors: ['apple'], only: ['DeepSeek V4'], modes: ['ssd'], ssd: true, kv: ['FP16'],
+      fmts: ['gguf'], mtp: () => false, ssdHitPower: 0.5,
+      note: 'Только Mac (Metal) и только DeepSeek V4 / V4.1 Flash, свои GGUF (antirez/deepseek-v4.1-flash-gguf). Не влезающих экспертов читает с SSD, Engram — тоже с SSD; сервер с API для Claude Code и OpenCode. Замер на M5 Max 128 ГБ: V4.1 Flash Q2 — 13,4 ток/с с подкачкой, V4 Flash Q2 (влезает целиком) — 34–39.' },
+    stream: { label: 'Подкачка с SSD (flash-moe, AirLLM)', vendors: ALL, moeOnly: true, noTables: true, modes: ['ssd'], ssd: true, kv: ['FP16', 'Q8_0', 'Q4_0'],
       fmts: ['mlx', 'gguf', 'any'], mtp: () => false,
       note: 'Эксперты MoE читаются с SSD по мере надобности, в памяти только горячие. Запускает модели больше памяти, но это единицы ток/с: для проб, не для работы.' },
   };
   const NON_EXPERT_SHARE = 0.4;   // доля активных весов MoE вне экспертов: внимание, роутер, общие эксперты (оценка)
-  const MTP_GAIN = 1.6;           // MTP-голова как черновик: замеры 1,6–1,8 (Strata), 1,6–2,7 (MTPLX), 1,4–1,7 (llama.cpp на CUDA)
+  const MTP_GAIN = 1.6;           // MTP-голова как черновик: замеры 1,4–1,6 (Strata), 1,6–3,0 (MTPLX), 1,4–1,7 (llama.cpp на CUDA); у сборки может быть своё mtpGain
   const PCIE_GBs = 25;            // PCIe 4.0 x16 на практике: по ней при чтении промпта гоняются эксперты из ОЗУ
   const UBATCH = 2048;            // токенов промпта на один проход экспертов
   // Попадание в кэш горячих экспертов = (доля кэша)^0,2: калибровка по flash-moe (15 % кэша → ~70 %).
@@ -583,7 +668,7 @@ var LLMCalc = (() => {
   // Задержка на слой при генерации (запуск ядер, синхронизация), мс. Калибровка: gpt-oss-120b на M5 Max — 76 ток/с
   // против 75–79 в замере (без неё 129); Qwen3.5-35B-A3B на RTX 5090 — 194 в замере. Плюс syncMs оболочки на слой,
   // когда часть работы на процессоре: llama.cpp --n-cpu-moe на RTX 3060 — 41 ток/с в замере.
-  const LAYER_MS = { apple: 0.19, cpu: 0.02 }, LAYER_MS_GPU = 0.09;
+  const LAYER_MS = { apple: 0.19, cpu: 0.02 }, LAYER_MS_GPU = 0.09, DENSE_LAT = 0.2;
 
   const vendorOfHw = hw => hw.vendor ?? (hw.cpuOnly ? 'cpu' : hw.unified ? 'apple' : 'nvidia');
   const isMoe = model => model.active < model.params * 0.5;
@@ -591,6 +676,8 @@ var LLMCalc = (() => {
     const e = ENGINES[key];
     if (!e || !e.vendors.includes(vendorOfHw(hw))) return false;
     if (e.strataOnly && !model.strata) return false;
+    if (e.only && !e.only.some(p => model.name?.startsWith(p))) return false;
+    if (e.noTables && model.ssdParams) return false;   // n-gram/Engram-таблицы умеют только Strata, ds4, MTPLX
     if (e.moeOnly && !isMoe(model)) return false;
     if (e.discreteOnly && hw.unified) return false;
     if (e.minVramGB && !hw.unified && hw.memGB < e.minVramGB) return false;
@@ -616,12 +703,15 @@ var LLMCalc = (() => {
 
   // ssd — n-gram/Engram-таблицы, которые оболочка держит на диске (в память они не идут)
   // cfg.ssd — переопределение для конкретной сборки (MLX-сборка без вынесенных таблиц грузит их в память)
-  function memoryNeeded({ model, bpw, ctx, kvBits, engine, ssd }) {
-    const onSsd = (ssd ?? (engine && ENGINES[engine]?.ssd)) ? (model.ssdParams ?? 0) : 0;
-    const weights = weightsBytes(model.params - onSsd, bpw);
+  // tablesBytes — размер файла таблиц у сборки, где они квантованы отдельно; bpw тогда — только основной части
+  function memoryNeeded({ model, bpw, ctx, kvBits, engine, ssd, tablesBytes }) {
+    const toSsd = !!(ssd ?? (engine && ENGINES[engine]?.ssd)) && !!model.ssdParams;
+    const onSsd = toSsd ? model.ssdParams : 0;
+    const tables = tablesBytes != null && model.ssdParams ? tablesBytes : null;
+    const weights = tables != null ? weightsBytes(model.params - model.ssdParams, bpw) + (toSsd ? 0 : tables) : weightsBytes(model.params - onSsd, bpw);
     const kv = kvBytesPerToken(model, kvBits, ctx) * ctx;
     const overhead = overheadBytes(weights, model, ctx);
-    return { weights, kv, overhead, ssd: weightsBytes(onSsd, bpw), total: weights + kv + overhead };
+    return { weights, kv, overhead, ssd: toSsd ? (tables ?? weightsBytes(onSsd, bpw)) : 0, total: weights + kv + overhead };
   }
 
   // На каждый новый токен читаются активные веса и весь KV-кэш
@@ -641,9 +731,11 @@ var LLMCalc = (() => {
   }
 
   function genTokPerSec(bandwidthGBs, bytesPerToken) { return bandwidthGBs * 1e9 * BW_EFF / bytesPerToken; }
-  // Постоянная часть времени на токен: слои × задержка; hybrid — часть работы на процессоре (выгрузка)
+  // Постоянная часть времени на токен: слои × задержка; hybrid — часть работы на процессоре (выгрузка).
+  // У плотных моделей нет маршрутизации и сбора экспертов — задержка в 5 раз меньше (DENSE_LAT): Qwen3.8 27B на M5 Max
+  // без MTP 25–28 ток/с в замере MTPLX (с полной задержкой выходило 17–20), Llama 8B Q4 на M4 Max — ~83 (было 53).
   function stepLatencySec(model, hw, hybrid = false, engine = null) {
-    const per = LAYER_MS[vendorOfHw(hw)] ?? LAYER_MS_GPU;
+    const per = (LAYER_MS[vendorOfHw(hw)] ?? LAYER_MS_GPU) * (isMoe(model) ? 1 : DENSE_LAT);
     const sync = hybrid ? (engine ? ENGINES[engine].syncMs ?? 0.3 : 0.3) : 0;
     return model.layers * (per + sync) / 1000;
   }
@@ -676,7 +768,7 @@ var LLMCalc = (() => {
     const mem = memoryNeeded(cfg);
     const usable = usableMemoryBytes(hw) * (e?.usable ?? 1);
     const bytes = bytesPerGeneratedToken(cfg);
-    const mtpGain = e && model.mtp && cfg.mtp !== false && e.mtp({ ...hw, vendor: vendorOfHw(hw) }) ? MTP_GAIN : 1;
+    const mtpGain = e && model.mtp && cfg.mtp !== false && e.mtp({ ...hw, vendor: vendorOfHw(hw) }) ? (cfg.mtpGain ?? MTP_GAIN) : 1;
     const gpuBw = hw.bandwidthGBs * 1e9 * BW_EFF;
     const gpuPre = prefillTokPerSec(hw.tflops, model, cfg.promptTokens);
     const base = { need: mem.total, usable, mem, bytesPerToken: bytes, engine: cfg.engine, mtpGain };
@@ -766,7 +858,10 @@ var LLMCalc = (() => {
   // Сравнение готовых сборок (BUILDS) на этом железе: лучшая из их оболочек, скорость при нескольких контекстах,
   // наибольший контекст и запасной вариант на Mac — с лимитом памяти GPU, поднятым через sysctl до 90 %.
   const COMPARE_CTX = [32768, 131072, 262144];
-  function buildBpw(model, b) { return b.bpw ?? b.sizeGB * 1e9 * 8 / model.params; }
+  function buildBpw(model, b) {
+    if (b.bpw) return b.bpw;
+    return b.tablesGB && model.ssdParams ? (b.sizeGB - b.tablesGB) * 1e9 * 8 / (model.params - model.ssdParams) : b.sizeGB * 1e9 * 8 / model.params;
+  }
   function compareBuilds(model, hw, { kvBits = 16, promptTokens = 0, ctxs = COMPARE_CTX } = {}) {
     const score = f => (f.status === 'fits' || f.status === 'experts' ? 2 : f.status === 'nofit' ? 0 : 1) * 1e6 + f.genTps;
     const apple = vendorOfHw(hw) === 'apple' && hw.unified && !hw.cpuOnly;
@@ -777,7 +872,8 @@ var LLMCalc = (() => {
       const engines = b.vendors && !b.vendors.includes(vendorOfHw(hw)) ? [] : b.engines.filter(k => engineOk(k, model, hw));
       if (!engines.length) return { build: b, bpw, engine: null, runs: [], maxCtx: 0, maxCtxRaised: 0 };
       const cfgFor = (k, ctx) => ({ model, bpw, ctx, kvBits: kvFor(k, b.kvBits ?? kvBits), engine: k, promptTokens,
-        ...(b.ssd !== undefined ? { ssd: b.ssd } : {}), ...(b.mtp === false ? { mtp: false } : {}) });
+        ...(b.ssd !== undefined ? { ssd: b.ssd } : {}), ...(b.mtp === false ? { mtp: false } : {}), ...(b.mtpGain ? { mtpGain: b.mtpGain } : {}),
+        ...(b.tablesGB ? { tablesBytes: b.tablesGB * 1e9 } : {}) });
       const engine = engines.map(k => ({ k, s: score(fit(cfgFor(k, ctxs[0]), hw)) })).sort((a, c) => c.s - a.s)[0].k;
       const runs = ctxs.filter(c => c <= limit(b)).map(ctx => {
         const f = fit(cfgFor(engine, ctx), hw);
@@ -945,6 +1041,7 @@ var LLMCalc = (() => {
     if (+$('cActive').value > +$('cParams').value) $('cActive').value = $('cParams').value;
   });
 
+  const vendorOfHwUI = h => h.vendor ?? (h.cpuOnly ? 'cpu' : h.unified ? 'apple' : 'nvidia');
   // --- вывод
   const row = (label, value, note) => `<tr><td>${label}${note ? `<small>${note}</small>` : ''}</td><td>${value}</td></tr>`;
 
@@ -975,7 +1072,7 @@ var LLMCalc = (() => {
     const hw = currentHw();
     // Оболочка: «Авто» — лучшая из тех, что запускаются; выбранная вручную — как есть, даже если хуже
     const base0 = { model, bpw: quant.bpw, ctx, kvBits, promptTokens: goal.promptTokens,
-      ...(pb && pb.ssd !== undefined ? { ssd: pb.ssd } : {}), ...(pb && pb.mtp === false ? { mtp: false } : {}) };
+      ...(pb && pb.ssd !== undefined ? { ssd: pb.ssd } : {}), ...(pb && pb.mtp === false ? { mtp: false } : {}), ...(pb?.mtpGain ? { mtpGain: pb.mtpGain } : {}), ...(pb?.tablesGB ? { tablesBytes: pb.tablesGB * 1e9 } : {}) };
     const auto = engSel.value === 'auto';
     const best = C.bestEngine(base0, hw);
     const engine = auto ? (best ? best.engine : 'llama.cpp') : engSel.value;
@@ -1082,8 +1179,15 @@ var LLMCalc = (() => {
       if (d.macWiredLimitHelps) tips.push(`На Mac поднять лимит памяти GPU: <code>sudo sysctl iogpu.wired_limit_mb=${Math.round(hw.memGB * 0.9 * 1024)}</code>. Тогда модель влезет; после перезагрузки лимит сбросится.`);
       if (!hw.unified) tips.push(`Добавить ОЗУ: со свободными ${Math.ceil((f.need - f.usable) / 0.85 / GB)} ГБ запустится с выгрузкой${d.moe && d.expertOffloadTps ? `: у MoE эксперты в ОЗУ дадут около ${fmtN(d.expertOffloadTps, 1)} ток/с (llama.cpp: <code>--n-cpu-moe N</code>)` : ' слоёв, но у плотной модели это будет очень медленно'}.`);
       tips.push(`Или железо с памятью от ${Math.ceil(f.need / GB)} ГБ${hw.unified ? ` (для Mac от ${Math.ceil(f.need / GB / (f.need <= 36 * GB * 2 / 3 ? 2 / 3 : 3 / 4))} ГБ общей)` : ''}.`);
+    } else if (d.bottleneck === 'offload' && f.status === 'ssd') {
+      title = 'Узкое место: подкачка с SSD';
+      why = `В памяти ${fmtGB(f.gpuNeed + f.ramNeed)}: внимание, общие веса, KV и кэш горячих экспертов. Остальные эксперты читаются с SSD (~${hw.ssdGBs ?? 6} ГБ/с против ${fmtBw(hw.bandwidthGBs)} у памяти); в кэш попадает около ${pct(f.ssdHit)} обращений.`;
+      if (d.bestQuantFits) tips.push(`Квант ${q(d.bestQuantFits)}: влезет целиком, ${tpsAt(d.bestQuantFits)} ток/с${d.bestQuantMeetsTarget === d.bestQuantFits ? '' : ' (медленнее цели, но без SSD)'}.`);
+      tips.push('Квант поменьше помогает вдвойне: в кэш влезает больше экспертов, и с диска читается меньше.');
+      if (hw.unified && vendorOfHwUI(hw) === 'apple') tips.push(`Поднять лимит памяти GPU (<code>sudo sysctl iogpu.wired_limit_mb=${Math.round(hw.memGB * 0.9 * 1024)}</code>): кэш экспертов станет больше.`);
+      tips.push(`Или память от ${Math.ceil(f.need / GB)} ГБ${hw.unified ? ` (Mac от ${Math.ceil(f.need / GB / 0.75)} ГБ)` : ''}: тогда модель влезет без подкачки.`);
     } else if (d.bottleneck === 'offload') {
-      title = f.status === 'ssd' ? 'Узкое место: подкачка с SSD' : 'Узкое место: выгрузка в ОЗУ';
+      title = 'Узкое место: выгрузка в ОЗУ';
       why = `В памяти ускорителя только ${pct(f.gpuFraction)} модели, остальное читается через ОЗУ (${fmtBw(hw.sysBandwidthGBs)} против ${fmtBw(hw.bandwidthGBs)}). ` +
         (d.moe ? 'У MoE на токен читаются только активные веса, поэтому скорость терпимая.' : 'У плотной модели каждый токен читает все веса, поэтому скорость падает почти до уровня чистого процессора.');
       if (d.bestQuantFits) tips.push(`Квант ${q(d.bestQuantFits)}: влезет целиком, ${tpsAt(d.bestQuantFits)} ток/с${d.bestQuantMeetsTarget === d.bestQuantFits ? '' : ' (медленнее цели, но без выгрузки)'}.`);

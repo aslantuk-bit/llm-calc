@@ -86,6 +86,7 @@
     if (+$('cActive').value > +$('cParams').value) $('cActive').value = $('cParams').value;
   });
 
+  const vendorOfHwUI = h => h.vendor ?? (h.cpuOnly ? 'cpu' : h.unified ? 'apple' : 'nvidia');
   // --- вывод
   const row = (label, value, note) => `<tr><td>${label}${note ? `<small>${note}</small>` : ''}</td><td>${value}</td></tr>`;
 
@@ -116,7 +117,7 @@
     const hw = currentHw();
     // Оболочка: «Авто» — лучшая из тех, что запускаются; выбранная вручную — как есть, даже если хуже
     const base0 = { model, bpw: quant.bpw, ctx, kvBits, promptTokens: goal.promptTokens,
-      ...(pb && pb.ssd !== undefined ? { ssd: pb.ssd } : {}), ...(pb && pb.mtp === false ? { mtp: false } : {}) };
+      ...(pb && pb.ssd !== undefined ? { ssd: pb.ssd } : {}), ...(pb && pb.mtp === false ? { mtp: false } : {}), ...(pb?.mtpGain ? { mtpGain: pb.mtpGain } : {}), ...(pb?.tablesGB ? { tablesBytes: pb.tablesGB * 1e9 } : {}) };
     const auto = engSel.value === 'auto';
     const best = C.bestEngine(base0, hw);
     const engine = auto ? (best ? best.engine : 'llama.cpp') : engSel.value;
@@ -223,8 +224,15 @@
       if (d.macWiredLimitHelps) tips.push(`На Mac поднять лимит памяти GPU: <code>sudo sysctl iogpu.wired_limit_mb=${Math.round(hw.memGB * 0.9 * 1024)}</code>. Тогда модель влезет; после перезагрузки лимит сбросится.`);
       if (!hw.unified) tips.push(`Добавить ОЗУ: со свободными ${Math.ceil((f.need - f.usable) / 0.85 / GB)} ГБ запустится с выгрузкой${d.moe && d.expertOffloadTps ? `: у MoE эксперты в ОЗУ дадут около ${fmtN(d.expertOffloadTps, 1)} ток/с (llama.cpp: <code>--n-cpu-moe N</code>)` : ' слоёв, но у плотной модели это будет очень медленно'}.`);
       tips.push(`Или железо с памятью от ${Math.ceil(f.need / GB)} ГБ${hw.unified ? ` (для Mac от ${Math.ceil(f.need / GB / (f.need <= 36 * GB * 2 / 3 ? 2 / 3 : 3 / 4))} ГБ общей)` : ''}.`);
+    } else if (d.bottleneck === 'offload' && f.status === 'ssd') {
+      title = 'Узкое место: подкачка с SSD';
+      why = `В памяти ${fmtGB(f.gpuNeed + f.ramNeed)}: внимание, общие веса, KV и кэш горячих экспертов. Остальные эксперты читаются с SSD (~${hw.ssdGBs ?? 6} ГБ/с против ${fmtBw(hw.bandwidthGBs)} у памяти); в кэш попадает около ${pct(f.ssdHit)} обращений.`;
+      if (d.bestQuantFits) tips.push(`Квант ${q(d.bestQuantFits)}: влезет целиком, ${tpsAt(d.bestQuantFits)} ток/с${d.bestQuantMeetsTarget === d.bestQuantFits ? '' : ' (медленнее цели, но без SSD)'}.`);
+      tips.push('Квант поменьше помогает вдвойне: в кэш влезает больше экспертов, и с диска читается меньше.');
+      if (hw.unified && vendorOfHwUI(hw) === 'apple') tips.push(`Поднять лимит памяти GPU (<code>sudo sysctl iogpu.wired_limit_mb=${Math.round(hw.memGB * 0.9 * 1024)}</code>): кэш экспертов станет больше.`);
+      tips.push(`Или память от ${Math.ceil(f.need / GB)} ГБ${hw.unified ? ` (Mac от ${Math.ceil(f.need / GB / 0.75)} ГБ)` : ''}: тогда модель влезет без подкачки.`);
     } else if (d.bottleneck === 'offload') {
-      title = f.status === 'ssd' ? 'Узкое место: подкачка с SSD' : 'Узкое место: выгрузка в ОЗУ';
+      title = 'Узкое место: выгрузка в ОЗУ';
       why = `В памяти ускорителя только ${pct(f.gpuFraction)} модели, остальное читается через ОЗУ (${fmtBw(hw.sysBandwidthGBs)} против ${fmtBw(hw.bandwidthGBs)}). ` +
         (d.moe ? 'У MoE на токен читаются только активные веса, поэтому скорость терпимая.' : 'У плотной модели каждый токен читает все веса, поэтому скорость падает почти до уровня чистого процессора.');
       if (d.bestQuantFits) tips.push(`Квант ${q(d.bestQuantFits)}: влезет целиком, ${tpsAt(d.bestQuantFits)} ток/с${d.bestQuantMeetsTarget === d.bestQuantFits ? '' : ' (медленнее цели, но без выгрузки)'}.`);
