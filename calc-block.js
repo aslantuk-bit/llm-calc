@@ -230,9 +230,9 @@ var LLMCalc = (() => {
           q: '4 бит', note: 'mlx-lm с MTP-головой; таблицы в памяти' },
         { label: 'MLX 4-bit', repo: HF + 'mlx-community/Qwen3.8-Flash-Next-4bit', sizeGB: 111.55, engines: ['mlx'], ssd: false, mtp: false, quant: 'MLX4',
           q: '4 бит', note: 'обычный mlx-lm, без MTP; таблицы в памяти. Та же сборка у TensorFold (111,6 ГБ)' },
-        { label: 'Ollama MLX (125b-mlx)', repo: 'ollama.com/library/qwen3.8-flash-next', sizeGB: 105, engines: ['mlx'], ssd: false, mtp: false, quant: 'MLX4',
+        { label: 'Ollama MLX (125b-mlx)', repo: 'ollama.com/library/qwen3.8-flash-next', sizeGB: 105, engines: ['ollama'], ssd: false, mtp: false, quant: 'MLX4',
           q: '4 бит', note: 'тег по умолчанию; что лежит в 105 ГБ, Ollama не пишет' },
-        { label: 'Ollama Q4_K_M', repo: 'ollama.com/library/qwen3.8-flash-next:125b-a6b-q4_K_M', sizeGB: 120, engines: ['llama.cpp'], quant: 'Q4_K_M',
+        { label: 'Ollama Q4_K_M', repo: 'ollama.com/library/qwen3.8-flash-next:125b-a6b-q4_K_M', sizeGB: 120, engines: ['ollama'], quant: 'Q4_K_M',
           q: 'Q4_K_M', note: 'GGUF через Ollama' },
         { label: 'Unsloth UD-IQ1_S', repo: HF + 'unsloth/Qwen3.8-Flash-Next-GGUF', sizeGB: 72.55, engines: ['llama.cpp', 'strata', 'ktrans'], quant: 'IQ2_XXS',
           q: 'KLD 0,40', note: 'крайний случай: совпадение с Q8_0 77 %' },
@@ -338,7 +338,7 @@ var LLMCalc = (() => {
           q: 'KLD 0,056', note: '' },
         { label: 'ISTA-DASLab IQ2_S-mtp', repo: HF + 'ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF', sizeGB: 9.61, engines: ['llama.cpp'], quant: 'IQ2_XXS',
           q: 'нет замера', note: 'GSQ-RCO; для 16 ГБ' },
-        { label: 'Ollama qwen3.8:27b', repo: 'ollama.com/library/qwen3.8', sizeGB: 18, engines: ['llama.cpp'], quant: 'Q4_K_M',
+        { label: 'Ollama qwen3.8:27b', repo: 'ollama.com/library/qwen3.8', sizeGB: 18, engines: ['ollama'], quant: 'Q4_K_M',
           q: 'не указано', note: 'есть и :27b-mlx (18 ГБ)' },
         { label: 'Qwen FP8 (официальная)', repo: HF + 'Qwen/Qwen3.8-27B-FP8', sizeGB: 30.89, engines: ['vllm'], vendors: ['nvidia', 'amd'], quant: 'Q8_0',
           q: 'почти без потерь', note: 'с MTP; для видеокарт' },
@@ -494,15 +494,19 @@ var LLMCalc = (() => {
   // Источники: README и документация движков, проверено 01.11.2026.
   const ALL = ['apple', 'nvidia', 'amd', 'intel', 'qualcomm', 'cpu'];
   const ENGINES = {
-    'llama.cpp': { label: 'llama.cpp (и Ollama, LM Studio)', vendors: ALL, modes: ['layers', 'experts'], kv: ['FP16', 'Q8_0', 'Q4_0'],
-      fmts: ['gguf', 'any'], mtp: hw => hw.vendor !== 'apple' && !hw.cpuOnly, syncMs: 0.3,
-      note: 'Универсальная, любая платформа. Не влезло — слои (-ngl) или эксперты MoE (--n-cpu-moe) уходят в ОЗУ. MTP-головы (--spec-type draft-mtp) с мая 2026; на Mac пока без выигрыша. Ollama и LM Studio работают на ней же. Qwen3.8-Flash-Next в основной ветке пока нет (черновик PR), запускается через Ollama, Strata или ветку Unsloth.' },
+    'llama.cpp': { label: 'llama.cpp (llama-server, LM Studio GGUF)', vendors: ALL, modes: ['layers', 'experts'], kv: ['FP16', 'Q8_0', 'Q4_0'],
+      fmts: ['gguf', 'any'], mtp: hw => hw.vendor !== 'apple' && !hw.cpuOnly, syncMs: 0.3, eff: (model, v) => macQwen(model, v),
+      caveats: [{ model: 'Qwen3.8-Flash-Next', text: 'в основной ветке модели нет (черновик PR): ветка Unsloth или Strata' }],
+      note: 'Универсальная, любая платформа. Не влезло — слои (-ngl) или эксперты MoE (--n-cpu-moe) уходят в ОЗУ. MTP-головы (--spec-type draft-mtp) с мая 2026; на Mac пока без выигрыша. LM Studio (GGUF) работает на ней же. На Mac с Qwen 3.5–3.8 генерация медленнее MLX: в замерах 0,55–0,8 от него (Metal-ядра линейного внимания). Qwen3.8-Flash-Next в основной ветке пока нет (черновик PR), запускается через Ollama, Strata или ветку Unsloth.' },
+    ollama: { label: 'Ollama', vendors: ALL, modes: ['layers'], kv: ['FP16', 'Q8_0', 'Q4_0'], fmts: ['gguf', 'mlx', 'any'], mtp: () => false, syncMs: 0.3,
+      eff: (model, v) => ({ gen: OLLAMA_GEN * (macQwen(model, v)?.gen ?? 1), why: 'в замерах 0,5–1,0 от голого llama.cpp на том же GGUF' + (macQwen(model, v) ? ', и на Mac с Qwen 3.5–3.8 ещё медленнее MLX' : '') }),
+      note: 'Самая простая установка, но медленнее голого llama.cpp на том же файле: в замерах 0,5–1,0 от него (внутри старая сборка llama.cpp; на RTX 5090 с Qwen3.8 27B разницы нет, на L40S — вдвое). Слои, которые не влезли, уходят в ОЗУ; эксперты MoE отдельно не выгружает. На Mac есть MLX-режим (превью). MTP не использует; запросы к Qwen3.8 обслуживает по одному.' },
     mlx: { label: 'MLX / MTPLX (только Mac)', vendors: ['apple'], modes: [], ssd: true, kv: ['FP16', 'Q8_0', 'Q4_0'],
       fmts: ['mlx', 'any'], mtp: () => true,
       note: 'Только Mac: mlx-lm 0.32, MTPLX 2.12, LM Studio (движки MLX и oMLX), Ollama (MLX-режим), oMLX, mlx-serve, vllm-mlx. MTPLX использует MTP-голову модели (×1,6–3,0) и держит n-gram-таблицы Qwen3.8-Flash-Next на SSD; обычный mlx-lm грузит их в память.' },
-    vllm: { label: 'vLLM / SGLang', vendors: ['nvidia', 'amd', 'intel'], modes: [], usable: 0.9, kv: ['FP16', 'Q8_0', 'Q4_0', 'TQ3'],
+    vllm: { label: 'vLLM / SGLang', vendors: ['nvidia', 'amd', 'intel'], modes: [], usable: 0.9, eff: () => ({ gen: 1.1, why: 'один запрос: в замерах на 10–12 % быстрее llama.cpp' }), kv: ['FP16', 'Q8_0', 'Q4_0', 'TQ3'],
       fmts: ['any', 'fp4', 'gptq'], mtp: () => true,
-      note: 'Серверная: всё в видеопамяти (занимает 90 %), KV в FP8, NVFP4 или TurboQuant 3 бит, MTP и EAGLE. Выигрывает при многих запросах сразу; одному пользователю llama.cpp не уступает.' },
+      note: 'Серверная: всё в видеопамяти (занимает 90 %), KV в FP8, NVFP4 или TurboQuant 3 бит, MTP и EAGLE. Выигрывает при многих запросах сразу; при одном запросе на 10–12 % быстрее llama.cpp (Qwen3.8 27B на RTX 4090, 5090, L40S).' },
     ktrans: { label: 'KTransformers / ik_llama.cpp (CPU + GPU)', vendors: ['nvidia', 'amd'], discreteOnly: true, modes: ['experts'], kv: ['FP16', 'Q8_0'], syncMs: 0.15,
       fmts: ['gguf', 'any'], mtp: () => true,
       note: 'Для больших MoE на одной видеокарте: экспертов в ОЗУ считает процессор (AMX, AVX-512), внимание и KV — на видеокарте. MTP у GLM и Qwen 3.5+.' },
@@ -516,6 +520,12 @@ var LLMCalc = (() => {
       fmts: ['mlx', 'gguf', 'any'], mtp: () => false,
       note: 'Эксперты MoE читаются с SSD по мере надобности, в памяти только горячие. Запускает модели больше памяти, но это единицы ток/с: для проб, не для работы.' },
   };
+  // КПД оболочки относительно базовой формулы (она откалибрована по llama.cpp и MTPLX) — только там, где есть парные замеры
+  // на одном железе с одной моделью: bishal.io (M1 Max), rapidmlx.com (M2 Pro), antekapetanovic.com (M4 Max), computingforgeeks.com
+  // (RTX 4090/5090, L40S), famstack.dev — сентябрь–октябрь 2026. llama.cpp на Mac с Qwen 3.5–3.8: 0,55–0,8 от MLX, берём 0,7
+  // (у Q4_K_M файл на 7 % больше — это формула учитывает сама). Ollama: 0,43–0,98 от llama.cpp, без вендорского замера — 0,8.
+  const MAC_QWEN_GEN = 0.7, OLLAMA_GEN = 0.8;
+  const macQwen = (model, v) => v === 'apple' && /^Qwen3\.[5-8]/.test(model.name ?? '') ? { gen: MAC_QWEN_GEN, why: 'на Mac с Qwen 3.5–3.8 в замерах 0,55–0,8 от MLX' } : null;
   const NON_EXPERT_SHARE = 0.4;   // доля активных весов MoE вне экспертов: внимание, роутер, общие эксперты (оценка)
   const MTP_GAIN = 1.6;           // MTP-голова как черновик: замеры 1,4–1,6 (Strata), 1,6–3,0 (MTPLX), 1,4–1,7 (llama.cpp на CUDA); у сборки может быть своё mtpGain
   const PCIE_GBs = 25;            // PCIe 4.0 x16 на практике: по ней при чтении промпта гоняются эксперты из ОЗУ
@@ -531,17 +541,21 @@ var LLMCalc = (() => {
 
   const vendorOfHw = hw => hw.vendor ?? (hw.cpuOnly ? 'cpu' : hw.unified ? 'apple' : 'nvidia');
   const isMoe = model => model.active < model.params * 0.5;
-  function engineOk(key, model, hw) {
+  // Почему оболочка здесь не запустится; null — запустится
+  function engineWhyNot(key, model, hw) {
     const e = ENGINES[key];
-    if (!e || !e.vendors.includes(vendorOfHw(hw))) return false;
-    if (e.strataOnly && !model.strata) return false;
-    if (e.only && !e.only.some(p => model.name?.startsWith(p))) return false;
-    if (e.noTables && model.ssdParams) return false;   // n-gram/Engram-таблицы умеют только Strata, ds4, MTPLX
-    if (e.moeOnly && !isMoe(model)) return false;
-    if (e.discreteOnly && hw.unified) return false;
-    if (e.minVramGB && !hw.unified && hw.memGB < e.minVramGB) return false;
-    return true;
+    if (!e) return 'неизвестная оболочка';
+    const v = vendorOfHw(hw);
+    if (!e.vendors.includes(v)) return e.vendors.join() === 'apple' ? 'только Mac' : v === 'apple' ? 'не для Mac' : v === 'cpu' ? 'нужна видеокарта' : 'не для этого железа';
+    if (e.strataOnly && !model.strata) return 'эту модель не поддерживает';
+    if (e.only && !e.only.some(p => model.name?.startsWith(p))) return 'только ' + e.only.join(', ');
+    if (e.noTables && model.ssdParams) return 'не умеет n-gram/Engram-таблицы';   // их умеют только Strata, ds4, MTPLX
+    if (e.moeOnly && !isMoe(model)) return 'только для MoE';
+    if (e.discreteOnly && hw.unified) return 'нужна отдельная видеокарта';
+    if (e.minVramGB && !hw.unified && hw.memGB < e.minVramGB) return `нужна видеокарта от ${e.minVramGB} ГБ`;
+    return null;
   }
+  const engineOk = (key, model, hw) => !engineWhyNot(key, model, hw);
 
   function weightsBytes(params, bpw) { return params * bpw / 8; }
 
@@ -627,10 +641,12 @@ var LLMCalc = (() => {
     const mem = memoryNeeded(cfg);
     const usable = usableMemoryBytes(hw) * (e?.usable ?? 1);
     const bytes = bytesPerGeneratedToken(cfg);
-    const mtpGain = e && model.mtp && cfg.mtp !== false && e.mtp({ ...hw, vendor: vendorOfHw(hw) }) ? (cfg.mtpGain ?? MTP_GAIN) : 1;
+    const mtpGain0 = e && model.mtp && cfg.mtp !== false && e.mtp({ ...hw, vendor: vendorOfHw(hw) }) ? (cfg.mtpGain ?? MTP_GAIN) : 1;
+    const eff = e?.eff?.(model, vendorOfHw(hw)) ?? null;
+    const mtpGain = mtpGain0 * (eff?.gen ?? 1);   // дальше множитель скорости: MTP × КПД оболочки
     const gpuBw = hw.bandwidthGBs * 1e9 * BW_EFF;
     const gpuPre = prefillTokPerSec(hw.tflops, model, cfg.promptTokens);
-    const base = { need: mem.total, usable, mem, bytesPerToken: bytes, engine: cfg.engine, mtpGain };
+    const base = { need: mem.total, usable, mem, bytesPerToken: bytes, engine: cfg.engine, mtpGain: mtpGain0, eff };
     const lat = stepLatencySec(model, hw), latHybrid = stepLatencySec(model, hw, true, cfg.engine);
     if (mem.total <= usable) {
       return { ...base, status: 'fits', gpuFraction: 1, genTps: mtpGain / (bytes / gpuBw + lat), prefillTps: gpuPre, latency: lat };
@@ -714,6 +730,21 @@ var LLMCalc = (() => {
   }
   function bestEngine(cfg, hw) { return rankEngines(cfg, hw)[0] ?? null; }
 
+  // Все оболочки при одних условиях (модель, биты, контекст, KV из формы): что меняется — только сама оболочка.
+  // Не запускающиеся — в конце, с причиной. maxCtx — до какого контекста держится этот же режим или лучше.
+  function compareEngines(cfg, hw, { fmt = 'any' } = {}) {
+    const score = f => (f.status === 'fits' || f.status === 'experts' ? 2 : f.status === 'nofit' ? 0 : 1) * 1e6 + f.genTps;
+    return Object.keys(ENGINES).map(k => {
+      const why = engineWhyNot(k, cfg.model, hw);
+      const measured = measuredFor(k, cfg.model, hw);
+      if (why) return { engine: k, why, measured };
+      const kvBits = kvFor(k, cfg.kvBits), c = { ...cfg, engine: k, kvBits };
+      const f = fit(c, hw);
+      const maxCtx = f.status === 'nofit' ? 0 : Math.min(maxContext(c, hw, RUNS.slice(0, RUNS.indexOf(f.status) + 1)), cfg.model.maxCtx);
+      return { engine: k, why: null, fit: f, kvBits, native: ENGINES[k].fmts.includes(fmt), maxCtx, measured };
+    }).sort((a, b) => (b.why ? -1 : score(b.fit)) - (a.why ? -1 : score(a.fit)));
+  }
+
   // Сравнение готовых сборок (BUILDS) на этом железе: лучшая из их оболочек, скорость при нескольких контекстах,
   // наибольший контекст и запасной вариант на Mac — с лимитом памяти GPU, поднятым через sysctl до 90 %.
   const COMPARE_CTX = [32768, 131072, 262144];
@@ -729,11 +760,13 @@ var LLMCalc = (() => {
     return buildsFor(model).map(b => {
       const bpw = buildBpw(model, b);
       const engines = b.vendors && !b.vendors.includes(vendorOfHw(hw)) ? [] : b.engines.filter(k => engineOk(k, model, hw));
-      if (!engines.length) return { build: b, bpw, engine: null, runs: [], maxCtx: 0, maxCtxRaised: 0 };
+      if (!engines.length) return { build: b, bpw, engine: null, alts: [], runs: [], maxCtx: 0, maxCtxRaised: 0 };
       const cfgFor = (k, ctx) => ({ model, bpw, ctx, kvBits: kvFor(k, b.kvBits ?? kvBits), engine: k, promptTokens,
         ...(b.ssd !== undefined ? { ssd: b.ssd } : {}), ...(b.mtp === false ? { mtp: false } : {}), ...(b.mtpGain ? { mtpGain: b.mtpGain } : {}),
         ...(b.tablesGB ? { tablesBytes: b.tablesGB * 1e9 } : {}) });
       const engine = engines.map(k => ({ k, s: score(fit(cfgFor(k, ctxs[0]), hw)) })).sort((a, c) => c.s - a.s)[0].k;
+      // другие оболочки той же сборки — чтобы было видно, сколько даёт выбор оболочки
+      const alts = engines.filter(k => k !== engine).map(k => ({ engine: k, fit: fit(cfgFor(k, ctxs[0]), hw) })).filter(a => a.fit.status !== 'nofit');
       const runs = ctxs.filter(c => c <= limit(b)).map(ctx => {
         const f = fit(cfgFor(engine, ctx), hw);
         const fr = raised && f.status !== 'fits' ? fit(cfgFor(engine, ctx), raised) : null;
@@ -742,8 +775,54 @@ var LLMCalc = (() => {
       const keep = ['fits', 'experts'];
       const maxCtx = Math.min(maxContext(cfgFor(engine, 0), hw, keep), limit(b));
       const maxCtxRaised = raised ? Math.min(maxContext(cfgFor(engine, 0), raised, keep), limit(b)) : 0;
-      return { build: b, bpw, engine, runs, maxCtx, maxCtxRaised };
+      return { build: b, bpw, engine, alts, runs, maxCtx, maxCtxRaised };
     });
+  }
+
+  // Замеры: оболочка, модель (начало названия), чип (часть названия пресета) и память, сборка или биты, контекст.
+  // Каждый пересчитывается калькулятором в тех же условиях — расхождение видно в интерфейсе и проверяется в test.js.
+  // range — разброс замера, value — середина. Только опубликованные числа, с источником.
+  const M5MAX = { chip: 'M5 Max 40', memGB: 128 };
+  const MEASURED = [
+    { engine: 'mlx', model: 'Qwen3.8-Flash-Next', ...M5MAX, build: 'MTPLX Optimized Speed', ctx: 111616, genTps: 61.8, src: 'mtplx.com, MTPLX 2.11.3', what: 'MTPLX, контекст 109K' },
+    { engine: 'mlx', model: 'Qwen3.8-Flash-Next', ...M5MAX, build: 'MTPLX Optimized Speed', ctx: 204800, genTps: 50.3, src: 'mtplx.com, MTPLX 2.11.3', what: 'MTPLX, контекст 200K' },
+    { engine: 'strata', model: 'Qwen3.8-Flash-Next', ...M5MAX, build: 'Unsloth UD-Q4_K_XL', ctx: 4096, genTps: 94, src: 'Strata 0.2.9, docs/MAC.md', what: 'с MTP' },
+    { engine: 'strata', model: 'Qwen3.8-Flash-Next', ...M5MAX, build: 'Unsloth UD-Q4_K_XL', ctx: 4096, mtp: false, genTps: 60.7, src: 'Strata 0.2.9, docs/MAC.md', what: 'без MTP' },
+    { engine: 'strata', model: 'DeepSeek V4.1 Flash', ...M5MAX, build: 'ISTA-DASLab IQ2_XS (2,25 бита)', ctx: 32768, genTps: 15.3, range: [13, 17.6], src: 'Strata 0.2.9, DS4_BUSY_CAP=2000', what: 'эксперты с SSD' },
+    { engine: 'ds4', model: 'DeepSeek V4.1 Flash', ...M5MAX, build: 'ds4 Q2 (antirez)', ctx: 32768, genTps: 13.4, src: 'antirez/ds4, README', what: 'эксперты с SSD' },
+    { engine: 'mlx', model: 'Qwen3.8 27B', ...M5MAX, build: 'MTPLX Optimized Quality', ctx: 4096, genTps: 40.6, src: 'mtplx.com/benchmarks', what: 'MTPLX, задача по коду' },
+    { engine: 'mlx', model: 'Qwen3.8 27B', ...M5MAX, build: 'MTPLX Optimized Speed', ctx: 4096, genTps: 58.7, src: 'mtplx.com/benchmarks', what: 'MTPLX, задача по коду' },
+    { engine: 'mlx', model: 'Qwen3.8 27B', ...M5MAX, build: 'MTPLX Bare Speed', ctx: 4096, genTps: 65.2, src: 'mtplx.com/benchmarks', what: 'MTPLX, задача по коду' },
+    // Парные замеры оболочек на одном железе (без MTP, короткий промпт): MLX против llama.cpp, Ollama, vLLM
+    ...[['mlx', 'Qwen3.8 27B', 4.5, 19.0], ['llama.cpp', 'Qwen3.8 27B', 4.85, 11.8], ['mlx', 'Qwen3.5 35B-A3B', 4.5, 67.8], ['llama.cpp', 'Qwen3.5 35B-A3B', 4.85, 54.5],
+      ['mlx', 'Qwen3.5 9B', 4.5, 57.1], ['llama.cpp', 'Qwen3.5 9B', 4.85, 37.1], ['mlx', 'Gemma 4 12B', 4.5, 33.1], ['llama.cpp', 'Gemma 4 12B', 4.5, 36.7],
+      ['mlx', 'Gemma 4 31B', 4.5, 14.9], ['llama.cpp', 'Gemma 4 31B', 4.5, 16.5]]
+      .map(([engine, model, bpw, genTps]) => ({ engine, model, chip: 'M1 Max', memGB: 32, bpw, ctx: 640, promptTokens: 512, mtp: false, genTps,
+        src: 'bishal.io, 16.09.2026', what: engine === 'mlx' ? 'mlx-lm, 4 бита' : bpw === 4.5 ? 'llama-bench, q4_0' : 'llama-bench, Q4_K_M' })),
+    ...[['mlx', 4.5, 130.2, 'MLX 4 бита'], ['llama.cpp', 4.6, 71.0, 'UD-Q4_K_XL'], ['ollama', 4.85, 43.5, 'Q4_K_M']]
+      .map(([engine, bpw, genTps, what]) => ({ engine, model: 'Qwen3.5 35B-A3B', chip: 'M4 Max 40', memGB: 128, bpw, ctx: 1024, mtp: false, genTps,
+        src: 'antekapetanovic.com', what: what + ', без thinking' })),
+    ...[['RTX 4090', 24, 54.3, 49.5, 39.4], ['RTX 5090', 32, 85.7, 77.8, 75.9]].flatMap(([chip, memGB, vllm, llama, ollama]) =>
+      [['vllm', 4.25, vllm, 'INT4 W4A16'], ['llama.cpp', 4.85, llama, 'UD-Q4_K_M'], ['ollama', 4.85, ollama, 'тот же GGUF']]
+        .map(([engine, bpw, genTps, what]) => ({ engine, model: 'Qwen3.8 27B', chip, memGB, bpw, ctx: 730, promptTokens: 474, mtp: false, genTps,
+          src: 'computingforgeeks.com, октябрь 2026', what: what + ', один запрос' }))),
+  ];
+  const measuredHw = (m, hw) => !!hw.name?.includes(m.chip) && hw.memGB === m.memGB;
+  function measuredFor(engine, model, hw) {
+    return MEASURED.filter(m => m.engine === engine && model.name?.startsWith(m.model) && measuredHw(m, hw));
+  }
+  // Расчёт для условий замера: сборка даёт биты и свои флаги (таблицы, MTP), иначе — m.bpw
+  function checkMeasured(m) {
+    const model = MODELS.find(md => md.name.startsWith(m.model));
+    const hw0 = HARDWARE.find(h => h.name.includes(m.chip));
+    if (!model || !hw0) return null;
+    const hw = { ...hw0, memGB: m.memGB };
+    const b = m.build ? buildsFor(model).find(x => x.label === m.build) : null;
+    const cfg = { model, bpw: b ? buildBpw(model, b) : m.bpw, ctx: m.ctx, kvBits: kvFor(m.engine, m.kvBits ?? b?.kvBits ?? 16), engine: m.engine, promptTokens: m.promptTokens ?? 0,
+      ...(b?.ssd !== undefined ? { ssd: b.ssd } : {}), ...(b?.mtp === false || m.mtp === false ? { mtp: false } : {}), ...(b?.mtpGain ? { mtpGain: b.mtpGain } : {}),
+      ...(b?.tablesGB ? { tablesBytes: b.tablesGB * 1e9 } : {}) };
+    const f = fit(cfg, hw);
+    return { ...m, hwName: hw0.name.replace(/^.*· /, ''), calcTps: f.genTps, status: f.status, dev: f.genTps / m.genTps - 1 };
   }
 
   const quantFits = (k, engine) => (engine ? ENGINES[engine].fmts : ['gguf', 'any']).includes(QUANTS[k].fmt);
@@ -788,7 +867,7 @@ var LLMCalc = (() => {
       && (f.status === 'nofit' || (RUNS.indexOf(r.fit.status) < RUNS.indexOf(f.status)) || r.fit.genTps > f.genTps * 1.15));
     return { bottleneck, fit: f, promptSec, kvShare, moe, bestQuantFits, bestQuantMeetsTarget, kvQ8Fits, kvQ4Fits,
       macWiredLimitHelps, expertOffloadTps, engines, betterEngines: better,
-      requiredBandwidthGBs: requiredBandwidthGBs(f.bytesPerToken, goal.genTps / (f.mtpGain ?? 1), stepLatencySec(cfg.model, hw)),
+      requiredBandwidthGBs: requiredBandwidthGBs(f.bytesPerToken, goal.genTps / (f.mtpGain ?? 1) / (f.eff?.gen ?? 1), stepLatencySec(cfg.model, hw)),
       requiredTflops: requiredTflops(cfg.model, goal.promptTokens, goal.promptSeconds) };
   }
 
@@ -809,5 +888,5 @@ var LLMCalc = (() => {
   return { GB, BW_EFF, COMPUTE_EFF, QUANTS, KV_QUANTS, KV_LABELS, MODELS, HARDWARE, ENGINES, NON_EXPERT_SHARE, MTP_GAIN,
     weightsBytes, kvBytesPerToken, memoryNeeded, bytesPerGeneratedToken, genTokPerSec, prefillTokPerSec, attnFlopsPerToken, stepLatencySec,
     requiredBandwidthGBs, requiredTflops, usableMemoryBytes, fit, maxContext, verdict, diagnose, estimateLayers,
-    engineOk, kvFor, rankEngines, bestEngine, BUILDS, buildsFor, buildsInfo, buildBpw, compareBuilds, COMPARE_CTX };
+    engineOk, engineWhyNot, compareEngines, MEASURED, measuredFor, checkMeasured, kvFor, rankEngines, bestEngine, BUILDS, buildsFor, buildsInfo, buildBpw, compareBuilds, COMPARE_CTX };
 })();

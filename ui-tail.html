@@ -53,7 +53,7 @@
     else {
       const h = C.HARDWARE[+v];
       hwUnified = h.unified; hwCpuOnly = !!h.cpuOnly;
-      hwExtra = { vendor: h.vendor, ssdGBs: h.ssdGBs, ...(h.gpuShare ? { gpuShare: h.gpuShare } : {}) };
+      hwExtra = { name: h.name, vendor: h.vendor, ssdGBs: h.ssdGBs, ...(h.gpuShare ? { gpuShare: h.gpuShare } : {}) };
       $('hwBw').value = h.bandwidthGBs; $('hwTf').value = h.tflops;
       $('sysMem').value = h.sysMemGB; $('sysBw').value = h.sysBandwidthGBs;
       if (h.memOptions) {
@@ -136,7 +136,7 @@
     const kvTok = C.kvBytesPerToken(model, kvBits, ctx);
     const f = engOk ? C.fit(cfg, hw) : { ...C.fit(cfg, hw), status: 'nofit', genTps: 0, prefillTps: 0 };
     const lat = C.stepLatencySec(model, hw);
-    const reqBw = C.requiredBandwidthGBs(bytes, goal.genTps / f.mtpGain, lat);
+    const reqBw = C.requiredBandwidthGBs(bytes, goal.genTps / f.mtpGain / (f.eff?.gen ?? 1), lat);
     const reqTf = C.requiredTflops(model, goal.promptTokens, goal.promptSeconds);
     const moe = model.active < model.params;
     const macNeed = mem.total <= 36 * GB * 2 / 3 ? mem.total * 3 / 2 : mem.total * 4 / 3;
@@ -193,6 +193,7 @@
       row('Максимальный контекст', maxCtx ? fmtCtx(Math.min(maxCtx, model.maxCtx)) + (maxCtx > model.maxCtx ? '<span class="chip">предел модели</span>' : '') : '—', f.status === 'experts' ? 'при котором внимание и KV остаются на видеокарте' : 'при котором модель целиком в памяти ускорителя') +
       row('Время до первого слова', f.prefillTps ? (promptSec + 1 / f.genTps).toFixed(1) + ' с' : '—', 'промпт + первый токен');
 
+    renderEngines(base0, hw, goal, quant, engine, auto);
     renderBuilds(model, hw, goal, kvBits, pb, engine);
     if (engOk) renderDiag(cfg, hw, goal, f, maxCtx);
     else $('diag').innerHTML = `<h3>Оболочка здесь не запускается</h3><p>${esc(E.label)}: ${esc(E.note)}</p>`
@@ -279,6 +280,62 @@
     $('diag').innerHTML = `<h3>${title}</h3><p>${why}</p><ul>${tips.map(t => `<li>${t}</li>`).join('')}</ul>`;
   }
 
+  // Все оболочки при одних условиях: строка — оболочка, щелчок выбирает её в форме
+  const PLACE = { fits: 'целиком в памяти', experts: 'эксперты MoE в ОЗУ', offload: 'часть слоёв в ОЗУ', ssd: 'эксперты подкачиваются с SSD' };
+  const engShort = k => C.ENGINES[k].label.split(' (')[0];
+  function renderEngines(base0, hw, goal, quant, engine, auto) {
+    const rows = C.compareEngines(base0, hw, { fmt: quant.fmt });
+    const top = Math.max(1, ...rows.filter(r => !r.why).map(r => r.fit.genTps));
+    const model = base0.model;
+    const head = '<tr><th>Оболочка</th><th>Как размещает модель</th><th class="n">Память</th><th>Генерация, ток/с</th>'
+      + `<th class="n">Промпт ${fmtN(goal.promptTokens)}</th><th class="n">Контекст до</th><th>Что даёт и чего нет</th><th class="n">Замер здесь</th></tr>`;
+    const meas = r => {
+      if (!r.measured.length) return '<span class="dim">нет</span>';
+      const c = r.measured.map(C.checkMeasured).filter(Boolean);
+      return c.map(x => `${fmtN(x.genTps, 1)}<small>${esc(x.what)}; расчёт ${fmtN(x.calcTps, 1)} (${x.dev >= 0 ? '+' : '−'}${Math.round(Math.abs(x.dev) * 100)} %)</small>`).join('');
+    };
+    const body = rows.map(r => {
+      const E = C.ENGINES[r.engine], cur = r.engine === engine;
+      const name = `<td>${esc(engShort(r.engine))}${cur ? `<span class="chip">${auto ? 'авто' : 'выбрана'}</span>` : ''}<small>${esc(E.label.includes('(') ? E.label.slice(E.label.indexOf('(') + 1, -1) : '')}</small></td>`;
+      if (r.why) return `<tr class="off">${name}<td colspan="6">не запустится: ${esc(r.why)}</td><td class="n">${meas(r)}</td></tr>`;
+      const f = r.fit;
+      const place = f.status === 'nofit' ? `не влезает: нужно ${fmtGB(f.need)}, есть ${fmtGB(f.usable)}`
+        : PLACE[f.status] + (f.status === 'experts' ? ` (${fmtGB(f.ramNeed)})` : f.status === 'offload' ? ` (на GPU ${Math.round(f.gpuFraction * 100)} %)` : f.status === 'ssd' ? ` (кэш ловит ~${Math.round(f.ssdHit * 100)} %)` : '');
+      const gives = [];
+      if (model.mtp) gives.push(f.mtpGain > 1 ? `MTP ×${String(f.mtpGain).replace('.', ',')}` : 'MTP не использует');
+      if (f.eff) gives.push(`скорость ×${fmtN(f.eff.gen, 2)}: ${esc(f.eff.why)}`);
+      if (f.mem.ssd) gives.push(`${fmtGB(f.mem.ssd)} таблиц на SSD`);
+      else if (model.ssdParams) gives.push('таблицы держит в памяти');
+      if (r.kvBits !== base0.kvBits) gives.push(`KV ${String(base0.kvBits).replace('.', ',')} бит не умеет — взят ${String(r.kvBits).replace('.', ',')}`);
+      if (E.usable) gives.push(`занимает ${Math.round(E.usable * 100)} % памяти`);
+      if (!r.native) gives.push('квант не родной — нужен аналог');
+      const caveat = (E.caveats ?? []).find(c => model.name.startsWith(c.model));
+      if (caveat) gives.push(`<b>${esc(caveat.text)}</b>`);
+      const pSec = f.prefillTps ? goal.promptTokens / f.prefillTps : 0;
+      const ok = f.status !== 'nofit';
+      return `<tr class="pick${cur ? ' cur' : ''}${ok ? '' : ' off'}" data-e="${r.engine}">${name}<td>${place}</td>`
+        + `<td class="n">${fmtGB(f.need)}</td>`
+        + `<td class="n">${ok ? `<span class="barbox"><span class="bar" style="width:${Math.round(f.genTps / top * 100)}%"></span></span>${fmtN(f.genTps, 1)}` : '—'}</td>`
+        + `<td class="n">${ok ? (pSec < 1 ? pSec.toFixed(1) : fmtN(pSec)) + ' с' : '—'}</td>`
+        + `<td class="n">${r.maxCtx ? fmtCtx(r.maxCtx) : '—'}</td>`
+        + `<td>${gives.join('; ') || '<span class="dim">—</span>'}</td><td class="n">${meas(r)}</td></tr>`;
+    }).join('');
+    $('engTable').innerHTML = head + body;
+    $('engTable').querySelectorAll('tr.pick').forEach(tr => tr.addEventListener('click', () => { engSel.value = tr.dataset.e; render(); }));
+    $('engCardNote').innerHTML = `Одни условия для всех: ${esc(model.name)}, ${fmtN(base0.bpw, 2)} бит на вес, контекст ${fmtCtx(base0.ctx)}, KV ${String(base0.kvBits).replace('.', ',')} бит. `
+      + 'Различаются только свойства оболочки: куда она кладёт то, что не влезло, умеет ли MTP, какой KV-кэш, сколько памяти себе берёт, держит ли n-gram/Engram-таблицы на SSD. '
+      + '«Авто» берёт первую строку: сначала те, где модель целиком в памяти (или эксперты в ОЗУ), из них — самую быструю. Щелчок по строке выбирает оболочку.';
+    const all = C.MEASURED.map(C.checkMeasured).filter(Boolean);
+    const here = x => model.name.startsWith(x.model) && hw.name?.includes(x.chip) && hw.memGB === x.memGB;
+    $('engMeasured').innerHTML = '<p>Каждый опубликованный замер пересчитан калькулятором в тех же условиях: та же сборка, контекст, железо. '
+      + 'Расхождение — расчёт относительно замера. Проверка в <code>test.js</code>: каждый замер в пределах ±40 %, медиана расхождения не больше 12 %, у каждой оболочки — не больше 20 %. Выделены замеры для выбранных модели и железа. Обработка промпта по оболочкам пока не различается: парных замеров мало и они противоречат друг другу.</p>'
+      + '<table class="builds"><tr><th>Оболочка</th><th>Модель, сборка</th><th>Железо</th><th class="n">Контекст</th><th class="n">Замер</th><th class="n">Расчёт</th><th class="n">Расхождение</th><th>Источник</th></tr>'
+      + all.map(x => `<tr class="${here(x) ? 'cur' : ''}"><td>${esc(engShort(x.engine))}</td><td>${esc(x.model)}<small>${esc(x.build ?? fmtN(x.bpw, 2) + ' бит')}; ${esc(x.what)}</small></td>`
+        + `<td>${esc(x.hwName)}, ${x.memGB} ГБ</td><td class="n">${fmtCtx(x.ctx)}</td><td class="n">${x.range ? x.range.map(v => fmtN(v, 1)).join('–') : fmtN(x.genTps, 1)}</td>`
+        + `<td class="n">${fmtN(x.calcTps, 1)}</td><td class="n">${x.dev >= 0 ? '+' : '−'}${Math.round(Math.abs(x.dev) * 100)} %</td><td>${esc(x.src)}</td></tr>`).join('')
+      + '</table>';
+  }
+
   // Готовые сборки: строка — конкретный репозиторий; щелчок ставит его квант и оболочку в форму
   function renderBuilds(model, hw, goal, kvBits, pb, engine) {
     const rows = C.compareBuilds(model, hw, { kvBits, promptTokens: goal.promptTokens });
@@ -299,7 +356,7 @@
     const body = rows.map((x, i) => {
       const b = x.build, cur = b === pb && x.engine === engine;
       return `<tr class="pick${cur ? ' cur' : ''}" data-i="${i}"><td>${esc(b.label)}${b.rec ? '<span class="chip">' + esc(b.rec) + '</span>' : ''}<small>${esc(b.repo)}${b.note ? ' — ' + esc(b.note) : ''}</small></td>`
-        + `<td>${x.engine ? esc(C.ENGINES[x.engine].label.split(' (')[0]) : '<span class="dim">не здесь</span>'}</td>`
+        + `<td>${x.engine ? esc(engShort(x.engine)) + (x.alts.length ? `<small>ещё: ${x.alts.map(a => `${esc(engShort(a.engine))} ${fmtN(a.fit.genTps, 1)}`).join(', ')}</small>` : '') : '<span class="dim">не здесь</span>'}</td>`
         + `<td class="n">${fmtN(b.sizeGB)} ГБ</td><td class="n">${fmtN(x.bpw, 2)}</td><td>${esc(b.q ?? '')}</td>`
         + ctxs.map(c => `<td class="n">${x.engine ? cell(x.runs.find(r => r.ctx === c)) : '—'}</td>`).join('')
         + `<td class="n">${x.engine ? ctxCell(x) : '—'}</td></tr>`;
@@ -310,7 +367,7 @@
       render();
     }));
     const B = C.buildsInfo(model);
-    $('buildsNote').innerHTML = (B?.note ? B.note + ' ' : '') + 'Скорость — генерация на выбранном железе, KV-кэш как в форме (если оболочка его умеет). «С sysctl» — влезет, если поднять лимит памяти GPU на Mac до 90 %. Щелчок по строке ставит квант и оболочку сборки в форму выше.';
+    $('buildsNote').innerHTML = (B?.note ? B.note + ' ' : '') + 'Скорость — генерация на выбранном железе в лучшей для сборки оболочке, KV-кэш как в форме (если оболочка его умеет); «ещё» — та же сборка в других оболочках при первом контексте. «С sysctl» — влезет, если поднять лимит памяти GPU на Mac до 90 %. Щелчок по строке ставит квант и оболочку сборки в форму выше.';
     $('buildsHow').innerHTML = B?.how ? `<summary>${esc(B.howTitle ?? 'Откуда данные')}</summary>${B.how}` : '';
     $('buildsHow').style.display = B?.how ? '' : 'none';
   }

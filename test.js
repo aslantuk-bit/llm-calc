@@ -457,6 +457,45 @@ test('сборки Qwen3.8 27B на M5 Max 128: MTPLX с MTP ×2,3–3,0 по з
   assert.ok(rowOf(rows, 'MLX 8-bit').runs[0].fit.genTps < 20, 'без MTP 8 бит медленно');
 });
 
+test('оболочки: причина, по которой не запустится, и сравнение при одних условиях', () => {
+  const q27 = C.MODELS.find(md => md.name.startsWith('Qwen3.8 27B'));
+  assert.strictEqual(C.engineWhyNot('vllm', q27, m5max128), 'не для Mac');
+  assert.strictEqual(C.engineWhyNot('mlx', q27, rtx5070), 'только Mac');
+  assert.strictEqual(C.engineWhyNot('stream', q27, m5max128), 'только для MoE');
+  assert.strictEqual(C.engineWhyNot('mlx', q27, m5max128), null);
+  const rows = C.compareEngines({ model: q27, bpw: 4.5, ctx: 32768, kvBits: 16, promptTokens: 4096 }, m5max128);
+  assert.strictEqual(rows.length, Object.keys(C.ENGINES).length, 'все оболочки в таблице');
+  const firstOff = rows.findIndex(r => r.why);
+  assert.ok(rows.slice(firstOff).every(r => r.why), 'не запускающиеся — в конце');
+  const tps = k => rows.find(r => r.engine === k).fit.genTps;
+  assert.ok(tps('mlx') > tps('llama.cpp') && tps('llama.cpp') > tps('ollama'), 'на Mac с Qwen: MLX > llama.cpp > Ollama');
+  assert.strictEqual(rows[0].engine, C.bestEngine({ model: q27, bpw: 4.5, ctx: 32768, kvBits: 16, promptTokens: 4096 }, m5max128).engine, 'первая строка = «Авто»');
+});
+
+test('КПД оболочки: vLLM при одном запросе быстрее llama.cpp, Ollama медленнее; на Gemma Mac без поправки', () => {
+  const q27 = C.MODELS.find(md => md.name.startsWith('Qwen3.8 27B'));
+  const r5090 = C.HARDWARE.find(h => h.name.startsWith('RTX 5090'));
+  const g = k => C.fit({ model: q27, bpw: 4.5, ctx: 4096, kvBits: 16, engine: k, mtp: false }, r5090).genTps;
+  near(g('vllm') / g('llama.cpp'), 1.1, 0.001, 'vLLM');
+  near(g('ollama') / g('llama.cpp'), 0.8, 0.001, 'Ollama');
+  const gem = C.MODELS.find(md => md.name.startsWith('Gemma 4 31B'));
+  const m = k => C.fit({ model: gem, bpw: 4.5, ctx: 4096, kvBits: 16, engine: k }, m5max128).genTps;
+  near(m('llama.cpp'), m('mlx'), 1e-9, 'Gemma: MLX и llama.cpp вровень');
+  assert.ok(C.buildsFor(q27).find(b => b.label === 'Ollama qwen3.8:27b').engines.includes('ollama'));
+});
+
+test('сверка с замерами: каждый в ±40 %, медиана расхождения до 12 %, у каждой оболочки — до 20 %', () => {
+  const all = C.MEASURED.map(C.checkMeasured);
+  assert.ok(all.every(Boolean), 'для каждого замера нашлись модель и железо');
+  for (const x of all) assert.ok(Math.abs(x.dev) <= 0.4, `${x.engine} ${x.model} ${x.chip}: ${x.calcTps.toFixed(1)} против ${x.genTps}`);
+  const med = a => { const b = a.map(Math.abs).sort((p, q) => p - q); return b[Math.floor(b.length / 2)]; };
+  assert.ok(med(all.map(x => x.dev)) <= 0.12, `медиана ${med(all.map(x => x.dev))}`);
+  for (const k of new Set(all.map(x => x.engine))) {
+    const d = med(all.filter(x => x.engine === k).map(x => x.dev));
+    assert.ok(d <= 0.2, `${k}: медиана ${d}`);
+  }
+});
+
 let failed = 0;
 for (const t of tests) {
   try { t.fn(); console.log('  ok   ' + t.name); }

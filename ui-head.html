@@ -58,6 +58,9 @@
   table.builds tr.pick:hover td { background: var(--chip); }
   table.builds tr.cur td { background: var(--chip); }
   .dim { color: var(--muted); font-weight: 400; }
+  table.builds tr.off td { color: var(--muted); }
+  .barbox { display: inline-block; width: 70px; height: 6px; background: var(--line); border-radius: 3px; margin-right: 8px; vertical-align: middle; }
+  .bar { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
   footer { padding: 0 24px 24px; color: var(--muted); font-size: 12px; max-width: 1400px; }
 </style>
 </head>
@@ -118,7 +121,7 @@
       <details><summary>Как считается</summary>
         Память = параметры × бит на вес ÷ 8 + KV-кэш на токен × контекст + накладные (0,75 ГБ + 4 % весов + буфер вычислений под контекст, с flash attention). N-gram- и Engram-таблицы (Qwen3.8-Flash-Next, DeepSeek V4.1) оболочки MLX и Strata держат на SSD.
         KV на токен = 2 × слои × KV-головы × размер головы × байт (для MLA — один вектор, для скользящего окна локальные слои держат только окно). Q8_0 и Q4_0 — это 8,5 и 4,5 бита: масштаб хранится на каждые 32 числа.
-        Время на токен = байт на токен ÷ (пропускная способность × 0,7) + слои × задержка на слой (0,19 мс на Mac, 0,09 на видеокартах; у плотных моделей впятеро меньше — нет маршрутизации экспертов; при выгрузке в ОЗУ ещё 0,07–0,3 мс в зависимости от оболочки). MTP-голова модели в оболочке, которая её поддерживает, ускоряет генерацию в 1,6 раза.
+        Время на токен = байт на токен ÷ (пропускная способность × 0,7) + слои × задержка на слой (0,19 мс на Mac, 0,09 на видеокартах; у плотных моделей впятеро меньше — нет маршрутизации экспертов; при выгрузке в ОЗУ ещё 0,07–0,3 мс в зависимости от оболочки). MTP-голова модели в оболочке, которая её поддерживает, ускоряет генерацию в 1,6 раза. КПД оболочки — только по парным замерам на одном железе: llama.cpp на Mac с Qwen 3.5–3.8 ×0,7 к MLX, Ollama ×0,8 к llama.cpp, vLLM при одном запросе ×1,1; остальное — без поправки.
         Промпт: TFLOPS = (2 × активные параметры + внимание) × токенов в секунду ÷ 0,5; внимание растёт с длиной промпта и на 100K+ токенов становится главной статьёй.
         Эксперты в ОЗУ (MoE): на видеокарте внимание, общие веса (≈ 40 % активных) и KV, свободная видеопамять — под часть экспертов; остальные эксперты читаются из ОЗУ. Калибровка по замерам: gpt-oss-120b на M5 Max, Qwen3.5/3.6-35B-A3B на RTX 3060 и RTX 5090, Strata на RTX 5070, flash-moe на M3 Max, MTPLX и Strata с Qwen3.8-Flash-Next на M5 Max — расхождение в пределах ±25 %. Подкачка с SSD: доля попаданий в кэш горячих экспертов = (доля кэша)^0,2 у flash-moe ^0,9 у Strata и ^0,5 у ds4 (калибровка по DeepSeek V4.1 Flash на M5 Max: 13–17,6 и 13,4 ток/с).
       </details>
@@ -129,6 +132,12 @@
       <table id="fitTable"></table>
       <div class="diag" id="diag"></div>
     </section>
+    <section class="card wide" id="engCard">
+      <h2>Оболочки на этом железе</h2>
+      <div class="hint" style="margin:0 0 10px" id="engCardNote"></div>
+      <table class="builds" id="engTable"></table>
+      <details id="engHow"><summary>Сверка расчёта с замерами</summary><div id="engMeasured"></div></details>
+    </section>
     <section class="card wide" id="buildsCard" style="display:none">
       <h2>Готовые сборки этой модели</h2>
       <div class="hint" style="margin:0 0 10px" id="buildsNote"></div>
@@ -137,4 +146,4 @@
     </section>
   </div>
 </main>
-<footer>Оценки, а не измерения: реальная скорость зависит от оболочки, её версии, драйверов и настроек. Обычно попадание в ±30 %. Оболочки и замеры сверены 01.11.2026. Тесты формул: <code>node test.js</code>.</footer>
+<footer>Оценки, а не измерения: реальная скорость зависит от оболочки, её версии, драйверов и настроек. Обычно попадание в ±30 %. Оболочки и замеры сверены 02.11.2026; сверка расчёта с каждым замером — в карточке «Оболочки на этом железе». Тесты формул: <code>node test.js</code>.</footer>
